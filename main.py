@@ -392,41 +392,56 @@ class RPAApp(ctk.CTk):
             command=self._dismiss_update_banner,
         ).grid(row=0, column=2, padx=(6, 0))
 
-    def _check_updates(self):
+    @staticmethod
+    def _git(args: list, cwd: str, timeout: int = 10) -> str:
+        """Run a git command; return stdout as str. Raises on error/timeout."""
+        kwargs = dict(
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        r = subprocess.run(["git"] + args, **kwargs)
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    def _check_updates(self, *, manual: bool = False):
         """Hilo de fondo: fetch → compara HEAD local vs remoto."""
         root = str(Path(__file__).parent)
         try:
+            fkwargs = dict(
+                cwd=root, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=20,
+            )
+            if sys.platform == "win32":
+                fkwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             fetch = subprocess.run(
-                ["git", "fetch", "origin", "main", "--quiet"],
-                cwd=root, capture_output=True, timeout=15,
+                ["git", "fetch", "origin", "main", "--quiet"], **fkwargs
             )
             if fetch.returncode != 0:
-                return   # sin internet, sin git, sin remote — ignorar silenciosamente
+                if manual:
+                    self.after(0, lambda: self._log(
+                        "No se pudo conectar a GitHub (sin git o sin red).", "warn"))
+                return
 
-            local = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=root, capture_output=True,
-            ).stdout.decode().strip()
+            local  = self._git(["rev-parse", "HEAD"],          cwd=root)
+            remote = self._git(["rev-parse", "origin/main"],   cwd=root)
 
-            remote = subprocess.run(
-                ["git", "rev-parse", "origin/main"],
-                cwd=root, capture_output=True,
-            ).stdout.decode().strip()
+            if not local or not remote:
+                return
 
             if local == remote:
-                return   # ya está al día — no mostrar nada
+                if manual:
+                    self.after(0, lambda: self._log("La app está al día. ✓", "ok"))
+                return
 
-            behind = subprocess.run(
-                ["git", "rev-list", "--count", "HEAD..origin/main"],
-                cwd=root, capture_output=True,
-            ).stdout.decode().strip()
+            behind   = self._git(["rev-list", "--count", "HEAD..origin/main"], cwd=root)
+            last_msg = self._git(["log", "-1", "--pretty=%s", "origin/main"],  cwd=root)
 
-            last_msg = subprocess.run(
-                ["git", "log", "-1", "--pretty=%s", "origin/main"],
-                cwd=root, capture_output=True,
-            ).stdout.decode().strip()
-
-            self.after(0, lambda: self._show_update_banner(behind, last_msg))
+            self.after(0, lambda: self._show_update_banner(behind or "?", last_msg or ""))
 
         except Exception:
             pass   # el check de actualizaciones nunca debe interrumpir la app
@@ -486,7 +501,7 @@ class RPAApp(ctk.CTk):
         self._log("Comprobando actualizaciones…", "info")
 
         def _check_and_restore():
-            self._check_updates()
+            self._check_updates(manual=True)
             self.after(0, lambda: self._btn_check_update.configure(
                 state="normal", text="🔄",
             ))
