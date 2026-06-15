@@ -357,7 +357,7 @@ def sucursal_matches_grupo(norm_sucursal: str, grupo_cc: str) -> bool:
     return SequenceMatcher(None, suc_num, grupo_num).ratio() >= 0.90
 
 
-# ── Lectura del CSV ──────────────────────────────────────────────────────
+# ── Lectura de archivos (CSV o XLSX) ─────────────────────────────────────
 
 def load_csv(filepath: str):
     with open(filepath, encoding="utf-8-sig", newline="") as f:
@@ -365,6 +365,29 @@ def load_csv(filepath: str):
     header = rows[HEADER_ROW_IDX]
     data   = rows[HEADER_ROW_IDX + 1:]
     return header, [r for r in data if any(c.strip() for c in r)]
+
+
+def load_xlsx(filepath: str):
+    """Lee un XLSX y devuelve (header, data) en el mismo formato que load_csv."""
+    from openpyxl import load_workbook
+    wb = load_workbook(filepath, data_only=True, read_only=True)
+    ws = wb.active
+    rows = []
+    for row in ws.iter_rows(values_only=True):
+        rows.append([str(c) if c is not None else "" for c in row])
+    wb.close()
+    if len(rows) <= HEADER_ROW_IDX:
+        return [], []
+    header = rows[HEADER_ROW_IDX]
+    data   = rows[HEADER_ROW_IDX + 1:]
+    return header, [r for r in data if any(c.strip() for c in r)]
+
+
+def load_file(filepath: str):
+    """Dispatcher: usa load_xlsx para .xlsx/.xls y load_csv para el resto."""
+    if Path(filepath).suffix.lower() in (".xlsx", ".xls"):
+        return load_xlsx(filepath)
+    return load_csv(filepath)
 
 
 def safe_get(row, idx: int) -> str:
@@ -691,6 +714,45 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
     ws.cell(row=r, column=9, value=round(grand_total, 2))
 
 
+# ── Hoja de datos originales ─────────────────────────────────────────────
+
+# Columnas añadidas por el RPA (0-indexed en las filas de datos):
+# 31=CC OC  32=Obs OC  33=Subtotal  34=Descuento  35=IVA  36=G.Envío  37=Total OC
+_RPA_COL_RANGE = range(31, 38)
+_RPA_FILL      = PatternFill("solid", fgColor="FFF2CC")   # amarillo pálido
+
+
+def build_datos_originales_sheet(ws, header: list, data: list):
+    ws.title = "Datos Originales"
+    ws.freeze_panes = "A2"
+
+    # ── Encabezados ──
+    ws.row_dimensions[1].height = 24
+    for col_idx, h in enumerate(header, start=1):
+        c = ws.cell(row=1, column=col_idx, value=h or f"Col{col_idx}")
+        c.fill      = FILL_HEADER
+        c.font      = FONT_HEADER
+        c.border    = BORDER
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # ── Datos ──
+    for r_idx, row_data in enumerate(data, start=2):
+        for col_idx, val in enumerate(row_data, start=1):
+            c = ws.cell(row=r_idx, column=col_idx, value=val)
+            c.font   = FONT_NORMAL
+            c.border = BORDER
+            c.alignment = Alignment(vertical="center")
+            if col_idx - 1 in _RPA_COL_RANGE:   # resaltar columnas del RPA
+                c.fill = _RPA_FILL
+
+    # ── Anchos de columna ──
+    n_cols = max(len(header), max((len(r) for r in data), default=0))
+    for i in range(1, n_cols + 1):
+        letter = get_column_letter(i)
+        # Columnas del RPA un poco más anchas
+        ws.column_dimensions[letter].width = 28 if (i - 1) in _RPA_COL_RANGE else 14
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -706,7 +768,7 @@ def main():
         sys.exit(1)
 
     print(f"Leyendo: {csv_path.name} …")
-    _, data = load_csv(str(csv_path))
+    header, data = load_file(str(csv_path))
     print(f"  {len(data)} registros cargados.")
 
     catalog = load_catalogs(DISTRIBUCION_DIR)
@@ -721,12 +783,14 @@ def main():
     ws_suc       = wb.create_sheet()
     ws_dist      = wb.create_sheet()
     ws_dist_calc = wb.create_sheet()
+    ws_orig      = wb.create_sheet()
 
     counts, details = build_main_sheet(ws_main, data)
     build_summary_sheet(ws_sum, counts, len(data))
     build_sucursal_detail_sheet(ws_suc, details)
     build_distribucion_sheet(ws_dist, details)
     build_distribucion_calculada_sheet(ws_dist_calc, details, catalog)
+    build_datos_originales_sheet(ws_orig, header, data)
 
     out_path = csv_path.parent / (csv_path.stem + "_comparacion.xlsx")
     wb.save(str(out_path))

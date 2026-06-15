@@ -322,13 +322,25 @@ class RPAApp(ctk.CTk):
 
         # ── Compare button ──
         self._btn_compare = ctk.CTkButton(
-            row, text="📊  COMPARAR CSV", width=200, height=44,
+            row, text="📊  COMPARAR", width=170, height=44,
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=("#1a4a6e", "#1a4a6e"),
             hover_color=("#0d2e47", "#0d2e47"),
             command=self._start_compare,
         )
         self._btn_compare.pack(side="left")
+
+        # ── Auto-compare toggle ──
+        self._auto_compare_var = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(
+            row,
+            text="Auto-comparar\nal terminar",
+            variable=self._auto_compare_var,
+            font=ctk.CTkFont(size=10),
+            width=44, height=22,
+            button_color=("#1a4a6e", "#1a4a6e"),
+            button_hover_color=("#0d2e47", "#0d2e47"),
+        ).pack(side="left", padx=(10, 0))
 
         ctk.CTkLabel(row, text="│", text_color="gray40",
                      font=ctk.CTkFont(size=28)).pack(side="left", padx=16)
@@ -623,7 +635,9 @@ class RPAApp(ctk.CTk):
         from rpa.excel_handler import ExcelHandler
 
         try:
-            handler = ExcelHandler(self._file_var.get())
+            file_path      = self._file_var.get()
+            auto_compare   = self._auto_compare_var.get()
+            handler = ExcelHandler(file_path)
             folio_rows = handler.get_folios()
             if MAX_RECORDS is not None:
                 folio_rows = folio_rows[:MAX_RECORDS]
@@ -708,7 +722,10 @@ class RPAApp(ctk.CTk):
                 for row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc in results:
                     handler.write_result(row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc)
                 handler.save()
-                self._log(f"Excel actualizado: {Path(self._file_var.get()).name}", "ok")
+                self._log(f"Excel actualizado: {Path(file_path).name}", "ok")
+
+                if auto_compare:
+                    self.after(0, lambda p=file_path: self._run_auto_compare(p))
 
             # ── Resumen final ──
             ok_count = sum(1 for r in results if r[1])   # r[1] = cc
@@ -763,13 +780,26 @@ class RPAApp(ctk.CTk):
         win.focus()
 
     # ────────────────────────────────────────────────────
+    def _run_auto_compare(self, file_path: str):
+        self._log("─" * 62, "info")
+        self._log(f"Auto-comparando: {Path(file_path).name}", "info")
+        self._status_lbl.configure(text=f"Auto-comparando: {Path(file_path).name}…")
+        self._btn_compare.configure(state="disabled")
+        t = threading.Thread(target=self._compare_thread, args=(file_path,), daemon=True)
+        t.start()
+
     # Comparar sucursales
     # ────────────────────────────────────────────────────
     def _start_compare(self):
         initial = str(Path(__file__).parent / "Recepcion_Facturas")
         path = filedialog.askopenfilename(
-            title="Seleccionar CSV para comparar sucursales",
-            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+            title="Seleccionar archivo para comparar sucursales",
+            filetypes=[
+                ("Excel / CSV", "*.xlsx *.xls *.csv"),
+                ("Excel",       "*.xlsx *.xls"),
+                ("CSV",         "*.csv"),
+                ("Todos",       "*.*"),
+            ],
             initialdir=initial,
         )
         if not path:
@@ -789,7 +819,7 @@ class RPAApp(ctk.CTk):
             from openpyxl import Workbook
 
             self._log("  Cargando registros…", "info")
-            _, data = cs.load_csv(csv_path)
+            header, data = cs.load_file(csv_path)
             total = len(data)
             self._log(f"  {total} registros cargados.", "info")
 
@@ -805,12 +835,14 @@ class RPAApp(ctk.CTk):
             ws_suc       = wb.create_sheet()
             ws_dist      = wb.create_sheet()
             ws_dist_calc = wb.create_sheet()
+            ws_orig      = wb.create_sheet()
 
             counts, details = cs.build_main_sheet(ws_main, data)
             cs.build_summary_sheet(ws_sum, counts, total)
             cs.build_sucursal_detail_sheet(ws_suc, details)
             cs.build_distribucion_sheet(ws_dist, details)
             cs.build_distribucion_calculada_sheet(ws_dist_calc, details, catalog)
+            cs.build_datos_originales_sheet(ws_orig, header, data)
 
             out = Path(csv_path).parent / (Path(csv_path).stem + "_comparacion.xlsx")
             wb.save(str(out))
