@@ -57,6 +57,7 @@ class RPAApp(ctk.CTk):
         self._errors = 0
 
         self._build_ui()
+        self._set_window_icon()
         self._poll_logs()
         threading.Thread(target=self._check_updates, daemon=True).start()
 
@@ -78,22 +79,36 @@ class RPAApp(ctk.CTk):
     def _build_header(self):
         hdr = ctk.CTkFrame(self, fg_color=(C_HEADER, C_HEADER), corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_columnconfigure(1, weight=1)
+        hdr.grid_columnconfigure(2, weight=1)   # subtitle expands
 
+        # ── Logo ──
+        _LOGO = Path(__file__).parent / "Logo_Petroil.png"
+        try:
+            from PIL import Image as _PILImage
+            _img = ctk.CTkImage(_PILImage.open(_LOGO), size=(40, 40))
+            ctk.CTkLabel(hdr, image=_img, text="").grid(
+                row=0, column=0, padx=(12, 0), pady=7)
+        except Exception:
+            ctk.CTkLabel(hdr, text="⛽", font=ctk.CTkFont(size=22),
+                         text_color="white").grid(row=0, column=0, padx=(14, 0), pady=7)
+
+        # ── Título ──
         ctk.CTkLabel(
             hdr,
-            text="  ⛽  RPA — Recepción de Facturas  |  SIPP Petroplazas",
+            text="  RPA — Recepción de Facturas  |  SIPP Petroplazas",
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color="white",
-        ).grid(row=0, column=0, padx=16, pady=11, sticky="w")
+        ).grid(row=0, column=1, padx=(6, 16), pady=11, sticky="w")
 
+        # ── Subtítulo ──
         ctk.CTkLabel(
             hdr,
             text="Automatización de captura CC + Observaciones OC",
             font=ctk.CTkFont(size=11),
             text_color="#99bbcc",
-        ).grid(row=0, column=1, padx=16, pady=11, sticky="e")
+        ).grid(row=0, column=2, padx=16, pady=11, sticky="e")
 
+        # ── Botón de actualización manual ──
         self._btn_check_update = ctk.CTkButton(
             hdr, text="🔄", width=36, height=36,
             font=ctk.CTkFont(size=16),
@@ -102,7 +117,20 @@ class RPAApp(ctk.CTk):
             command=self._manual_check_updates,
             cursor="hand2",
         )
-        self._btn_check_update.grid(row=0, column=2, padx=(0, 10), pady=6)
+        self._btn_check_update.grid(row=0, column=3, padx=(0, 10), pady=6)
+
+    def _set_window_icon(self):
+        """Ícono de la ventana en taskbar/titlebar (PNG → PhotoImage)."""
+        logo_path = Path(__file__).parent / "Logo_Petroil.png"
+        if not logo_path.exists():
+            return
+        try:
+            from PIL import Image as _PILImage, ImageTk as _ImageTk
+            img = _PILImage.open(logo_path).resize((32, 32), _PILImage.LANCZOS)
+            self._win_icon = _ImageTk.PhotoImage(img)
+            self.iconphoto(True, self._win_icon)
+        except Exception:
+            pass
 
     def _build_config(self):
         cfg = ctk.CTkFrame(self)
