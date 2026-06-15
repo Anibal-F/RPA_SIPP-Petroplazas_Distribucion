@@ -192,7 +192,7 @@ class RPAApp(ctk.CTk):
         ).pack(side="left", padx=(0, 8))
 
         self._workers_seg = ctk.CTkSegmentedButton(
-            wrk, values=["1×", "2×", "4×"], width=180,
+            wrk, values=["1×", "2×", "4×", "8×"], width=230,
         )
         self._workers_seg.set("1×")
         self._workers_seg.pack(side="left")
