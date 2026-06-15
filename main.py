@@ -433,7 +433,12 @@ class RPAApp(ctk.CTk):
 
     def _restart_app(self):
         self.destroy()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        if sys.platform == "win32":
+            # os.execv no reemplaza el proceso en Windows — usar Popen + exit
+            subprocess.Popen([sys.executable] + sys.argv)
+            sys.exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def _manual_check_updates(self):
         """Triggered by the 🔄 button in the header — runs the same check in background."""
@@ -580,6 +585,9 @@ class RPAApp(ctk.CTk):
             self._status_lbl.configure(text="Cancelando...")
 
     def _thread_run(self):
+        # Playwright requiere ProactorEventLoop en Windows (Python ≤ 3.9)
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
         asyncio.run(self._async_run())
 
     async def _async_run(self):
