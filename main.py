@@ -6,7 +6,9 @@ GUI built with customtkinter. Playwright automation runs in a background thread.
 import argparse
 import asyncio
 import csv
+import os
 import queue
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -56,15 +58,17 @@ class RPAApp(ctk.CTk):
 
         self._build_ui()
         self._poll_logs()
+        threading.Thread(target=self._check_updates, daemon=True).start()
 
     # ────────────────────────────────────────────────────
     # UI construction
     # ────────────────────────────────────────────────────
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)   # log area expands
+        self.grid_rowconfigure(5, weight=1)   # log area expands
 
         self._build_header()
+        self._build_update_banner()   # row 1 — oculto hasta que haya actualizaciones
         self._build_config()
         self._build_stats()
         self._build_progress()
@@ -90,9 +94,19 @@ class RPAApp(ctk.CTk):
             text_color="#99bbcc",
         ).grid(row=0, column=1, padx=16, pady=11, sticky="e")
 
+        self._btn_check_update = ctk.CTkButton(
+            hdr, text="🔄", width=36, height=36,
+            font=ctk.CTkFont(size=16),
+            fg_color="transparent", hover_color="#1a3a5c",
+            border_width=0,
+            command=self._manual_check_updates,
+            cursor="hand2",
+        )
+        self._btn_check_update.grid(row=0, column=2, padx=(0, 10), pady=6)
+
     def _build_config(self):
         cfg = ctk.CTkFrame(self)
-        cfg.grid(row=1, column=0, sticky="ew", padx=12, pady=(10, 4))
+        cfg.grid(row=2, column=0, sticky="ew", padx=12, pady=(10, 4))
         cfg.grid_columnconfigure(1, weight=1)
 
         # ── File picker ──
@@ -163,7 +177,7 @@ class RPAApp(ctk.CTk):
 
     def _build_stats(self):
         stats = ctk.CTkFrame(self, fg_color="transparent")
-        stats.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
+        stats.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
         for c in range(4):
             stats.grid_columnconfigure(c, weight=1)
 
@@ -192,7 +206,7 @@ class RPAApp(ctk.CTk):
 
     def _build_progress(self):
         prog = ctk.CTkFrame(self, fg_color="transparent")
-        prog.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 4))
+        prog.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 4))
         prog.grid_columnconfigure(0, weight=1)
 
         top = ctk.CTkFrame(prog, fg_color="transparent")
@@ -226,7 +240,7 @@ class RPAApp(ctk.CTk):
 
     def _build_logs(self):
         wrap = ctk.CTkFrame(self)
-        wrap.grid(row=4, column=0, sticky="nsew", padx=12, pady=4)
+        wrap.grid(row=5, column=0, sticky="nsew", padx=12, pady=4)
         wrap.grid_columnconfigure(0, weight=1)
         wrap.grid_rowconfigure(1, weight=1)
 
@@ -253,7 +267,7 @@ class RPAApp(ctk.CTk):
 
     def _build_buttons(self):
         row = ctk.CTkFrame(self, fg_color="transparent")
-        row.grid(row=5, column=0, sticky="ew", padx=12, pady=(4, 14))
+        row.grid(row=6, column=0, sticky="ew", padx=12, pady=(4, 14))
 
         self._btn_run = ctk.CTkButton(
             row, text="▶  EJECUTAR RPA", width=190, height=44,
@@ -300,6 +314,139 @@ class RPAApp(ctk.CTk):
             command=self._open_catalogs,
         )
         self._btn_catalogs.pack(side="left")
+
+    # ────────────────────────────────────────────────────
+    # Auto-update
+    # ────────────────────────────────────────────────────
+    def _build_update_banner(self):
+        """Banner verde entre header y config. Oculto hasta que haya commits nuevos."""
+        self._update_frame = ctk.CTkFrame(
+            self, fg_color=("#1b5e33", "#1b5e33"), corner_radius=0,
+        )
+        # No se agrega al grid todavía — se muestra solo si hay actualizaciones.
+
+        inner = ctk.CTkFrame(self._update_frame, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=7)
+        inner.grid_columnconfigure(0, weight=1)
+
+        self._update_lbl = ctk.CTkLabel(
+            inner, text="",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="white",
+        )
+        self._update_lbl.grid(row=0, column=0, sticky="w")
+
+        self._btn_update = ctk.CTkButton(
+            inner, text="⬇  Actualizar y reiniciar", width=200, height=28,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="white", text_color="#1b5e33",
+            hover_color="#d4f0d4",
+            command=self._do_update,
+        )
+        self._btn_update.grid(row=0, column=1, padx=(14, 0))
+
+        ctk.CTkButton(
+            inner, text="✕", width=28, height=28,
+            fg_color="transparent", text_color="#aaddaa",
+            hover_color="#0f3d22",
+            command=self._dismiss_update_banner,
+        ).grid(row=0, column=2, padx=(6, 0))
+
+    def _check_updates(self):
+        """Hilo de fondo: fetch → compara HEAD local vs remoto."""
+        root = str(Path(__file__).parent)
+        try:
+            fetch = subprocess.run(
+                ["git", "fetch", "origin", "main", "--quiet"],
+                cwd=root, capture_output=True, timeout=15,
+            )
+            if fetch.returncode != 0:
+                return   # sin internet, sin git, sin remote — ignorar silenciosamente
+
+            local = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root, capture_output=True,
+            ).stdout.decode().strip()
+
+            remote = subprocess.run(
+                ["git", "rev-parse", "origin/main"],
+                cwd=root, capture_output=True,
+            ).stdout.decode().strip()
+
+            if local == remote:
+                return   # ya está al día — no mostrar nada
+
+            behind = subprocess.run(
+                ["git", "rev-list", "--count", "HEAD..origin/main"],
+                cwd=root, capture_output=True,
+            ).stdout.decode().strip()
+
+            last_msg = subprocess.run(
+                ["git", "log", "-1", "--pretty=%s", "origin/main"],
+                cwd=root, capture_output=True,
+            ).stdout.decode().strip()
+
+            self.after(0, lambda: self._show_update_banner(behind, last_msg))
+
+        except Exception:
+            pass   # el check de actualizaciones nunca debe interrumpir la app
+
+    def _show_update_banner(self, behind: str, last_msg: str):
+        n = behind or "?"
+        self._update_lbl.configure(
+            text=f"  🔄  {n} actualización(es) disponible(s)  ·  \"{last_msg}\""
+        )
+        self._update_frame.grid(row=1, column=0, sticky="ew")
+        self._log(f"Actualización disponible ({n} commit(s)): {last_msg}", "warn")
+
+    def _dismiss_update_banner(self):
+        self._update_frame.grid_remove()
+
+    def _do_update(self):
+        self._btn_update.configure(state="disabled", text="Actualizando…")
+
+        def _pull():
+            root = str(Path(__file__).parent)
+            try:
+                res = subprocess.run(
+                    ["git", "pull", "origin", "main"],
+                    cwd=root, capture_output=True, text=True, timeout=60,
+                )
+                if res.returncode == 0:
+                    self.after(0, self._restart_app)
+                else:
+                    err = res.stderr.strip() or res.stdout.strip()
+                    self.after(0, lambda: messagebox.showerror(
+                        "Error al actualizar",
+                        f"git pull falló:\n\n{err}",
+                        parent=self,
+                    ))
+                    self.after(0, lambda: self._btn_update.configure(
+                        state="normal", text="⬇  Actualizar y reiniciar",
+                    ))
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror(
+                    "Error", str(exc), parent=self,
+                ))
+
+        threading.Thread(target=_pull, daemon=True).start()
+
+    def _restart_app(self):
+        self.destroy()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def _manual_check_updates(self):
+        """Triggered by the 🔄 button in the header — runs the same check in background."""
+        self._btn_check_update.configure(state="disabled", text="⏳")
+        self._log("Comprobando actualizaciones…", "info")
+
+        def _check_and_restore():
+            self._check_updates()
+            self.after(0, lambda: self._btn_check_update.configure(
+                state="normal", text="🔄",
+            ))
+
+        threading.Thread(target=_check_and_restore, daemon=True).start()
 
     # ────────────────────────────────────────────────────
     # File handling
