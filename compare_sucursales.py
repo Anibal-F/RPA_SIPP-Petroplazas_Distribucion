@@ -342,7 +342,9 @@ def sucursal_matches_grupo(norm_sucursal: str, grupo_cc: str) -> bool:
     - Usa similitud ≥ 0.90 para variaciones ortográficas menores.
       Ej: 'BELLAVISTA' vs 'BELLA VISTA' → ratio 0.95 → MATCH
     """
-    norm_grupo = _normalize(grupo_cc)
+    # Separar camelCase antes de normalizar: "ES_MunichII" → "ES_Munich II"
+    grupo_cc_split = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', grupo_cc)
+    norm_grupo = _normalize(grupo_cc_split)
     norm_grupo_clean = re.sub(r"^(ES|CC)_+", "", norm_grupo)
     norm_grupo_clean = norm_grupo_clean.replace("_", " ").strip()
 
