@@ -304,6 +304,44 @@ def find_all_sucursales_in_obs(obs: str) -> list[tuple[str, str]]:
 _ZONA_STOP = re.compile(r"\b(?:CON|DE|DEL|PARA|Y|A)\b")
 
 
+_UT_PATTERN = re.compile(r'\b((?:AU|CA)-\d+)\b', re.IGNORECASE)
+
+
+def load_utilitario_catalogs(directory: Path) -> dict:
+    """
+    Lee CSV de Distribucion/Utilitarios/.
+    Devuelve {código_utilitario_upper → clave_distribución_original}
+    Ej: {"AU-112": "MAZATLAN GRAL", "AU-065": "ES_Corporativo", "AU-109": "ZONA CULIACAN"}
+    """
+    ut_dir = directory / "Utilitarios"
+    result: dict = {}
+    if not ut_dir.is_dir():
+        return result
+    for csv_file in sorted(ut_dir.glob("*.csv")):
+        try:
+            with open(csv_file, encoding="utf-8-sig", newline="") as f:
+                for row in csv.DictReader(f):
+                    dist_key = (row.get("Distribución") or row.get("Distribucion") or "").strip()
+                    ut_code  = (row.get("Utilitario") or "").strip()
+                    if dist_key and ut_code:
+                        result[ut_code.upper()] = dist_key
+        except Exception:
+            pass
+    return result
+
+
+def find_utilitario_in_text(text: str, ut_catalog: dict):
+    """
+    Busca el primer código de utilitario (AU-xxx / CA-xxx) en el texto que
+    esté en el catálogo. Retorna (código, clave_dist) o None.
+    """
+    for m in _UT_PATTERN.finditer(text or ""):
+        code = m.group(1).upper()
+        if code in ut_catalog:
+            return code, ut_catalog[code]
+    return None
+
+
 def find_zones_in_obs(obs: str) -> list[str]:
     """
     Devuelve una lista de etiquetas de zona encontradas en las observaciones.
@@ -432,7 +470,7 @@ def _dcell(ws, row, col, value, fill=None, wrap=False):
 
 # ── Hoja principal ───────────────────────────────────────────────────────
 
-def build_main_sheet(ws, data):
+def build_main_sheet(ws, data, ut_catalog: dict | None = None):
     COLS = [
         (COL_SUCURSAL, "Sucursal"),
         (COL_FACTURA,  "Factura"),
@@ -460,6 +498,7 @@ def build_main_sheet(ws, data):
 
     for row_data in data:
         obs      = safe_get(row_data, COL_OBS_OC)
+        cc_oc    = safe_get(row_data, COL_CC_OC)
         grupo_cc = safe_get(row_data, COL_GRUPO_CC)
 
         found = find_all_sucursales_in_obs(obs)   # [(nombre, norm), ...]
@@ -467,13 +506,25 @@ def build_main_sheet(ws, data):
 
         n_suc  = len(found)
         n_zone = len(zones)
+        ut_dist_key = None   # clave de distribución por utilitario
 
         if n_suc == 0 and n_zone == 0:
-            # Nada detectado
-            fill     = FILL_GRAY
-            label    = "Sin sucursal"
-            detected = ""
-            counts["SIN SUCURSAL"] += 1
+            # Buscar utilitario en CC OC y en Observaciones OC
+            ut_result = None
+            if ut_catalog:
+                ut_result = (find_utilitario_in_text(cc_oc, ut_catalog)
+                             or find_utilitario_in_text(obs, ut_catalog))
+            if ut_result:
+                ut_code, ut_dist_key = ut_result
+                detected = ut_code
+                fill     = FILL_BLUE
+                label    = "DISTRIBUCIÓN (UT)"
+                counts["DISTRIBUCIÓN"] += 1
+            else:
+                fill     = FILL_GRAY
+                label    = "Sin sucursal"
+                detected = ""
+                counts["SIN SUCURSAL"] += 1
 
         elif n_suc == 1 and n_zone == 0:
             # Un solo match → MATCH o MISMATCH
@@ -498,18 +549,19 @@ def build_main_sheet(ws, data):
             counts["DISTRIBUCIÓN"] += 1
 
         details.append({
-            "sucursal": safe_get(row_data, COL_SUCURSAL),
-            "factura":  safe_get(row_data, COL_FACTURA),
-            "folio":    safe_get(row_data, COL_FOLIO),
-            "grupo_cc": grupo_cc,
-            "cc_oc":    safe_get(row_data, COL_CC_OC),
-            "obs":      obs,
-            "detected": detected,
-            "label":    label,
-            "fill":     fill,
+            "sucursal":    safe_get(row_data, COL_SUCURSAL),
+            "factura":     safe_get(row_data, COL_FACTURA),
+            "folio":       safe_get(row_data, COL_FOLIO),
+            "grupo_cc":    grupo_cc,
+            "cc_oc":       cc_oc,
+            "obs":         obs,
+            "detected":    detected,
+            "label":       label,
+            "fill":        fill,
             "n_suc":       len(found),
             "total_mx":    safe_get(row_data, COL_TOTAL_MX),
             "subtotal_oc": safe_get(row_data, COL_SUBTOTAL_OC),
+            "ut_dist_key": ut_dist_key,
         })
 
     for r_idx, d in enumerate(details, start=2):
@@ -681,7 +733,13 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
             continue
 
         subtotal_oc = _parse_amount(d.get("subtotal_oc", ""))
-        dist        = calculate_distribution(d["detected"], d["grupo_cc"], subtotal_oc, catalog)
+        ut_key = d.get("ut_dist_key")
+        if ut_key:
+            # Utilitario: buscar la clave de distribución directamente en el catálogo
+            entries = catalog.get(_normalize(ut_key), [])
+            dist = [(est, pct, round(subtotal_oc * pct / 100, 2)) for est, pct in entries]
+        else:
+            dist = calculate_distribution(d["detected"], d["grupo_cc"], subtotal_oc, catalog)
 
         if not dist:
             ws.row_dimensions[r].height = 28
@@ -775,11 +833,14 @@ def main():
     header, data = load_file(str(csv_path))
     print(f"  {len(data)} registros cargados.")
 
-    catalog = load_catalogs(DISTRIBUCION_DIR)
+    catalog    = load_catalogs(DISTRIBUCION_DIR)
+    ut_catalog = load_utilitario_catalogs(DISTRIBUCION_DIR)
     if catalog:
         print(f"  {len(catalog)} claves de catálogo cargadas desde {DISTRIBUCION_DIR.name}/")
     else:
         print(f"  [AVISO] No se encontró la carpeta {DISTRIBUCION_DIR} — sin distribución calculada.")
+    if ut_catalog:
+        print(f"  {len(ut_catalog)} utilitarios cargados desde {DISTRIBUCION_DIR.name}/Utilitarios/")
 
     wb = Workbook()
     ws_main      = wb.active
@@ -789,7 +850,7 @@ def main():
     ws_dist_calc = wb.create_sheet()
     ws_orig      = wb.create_sheet()
 
-    counts, details = build_main_sheet(ws_main, data)
+    counts, details = build_main_sheet(ws_main, data, ut_catalog)
     build_summary_sheet(ws_sum, counts, len(data))
     build_sucursal_detail_sheet(ws_suc, details)
     build_distribucion_sheet(ws_dist, details)

@@ -838,11 +838,14 @@ class RPAApp(ctk.CTk):
             total = len(data)
             self._log(f"  {total} registros cargados.", "info")
 
-            catalog = cs.load_catalogs(cs.DISTRIBUCION_DIR)
+            catalog    = cs.load_catalogs(cs.DISTRIBUCION_DIR)
+            ut_catalog = cs.load_utilitario_catalogs(cs.DISTRIBUCION_DIR)
             if catalog:
                 self._log(f"  {len(catalog)} claves de catálogo de distribución cargadas.", "info")
             else:
                 self._log("  [AVISO] Carpeta Distribucion/ no encontrada — sin cálculo de montos.", "warn")
+            if ut_catalog:
+                self._log(f"  {len(ut_catalog)} utilitarios cargados.", "info")
 
             wb           = Workbook()
             ws_main      = wb.active
@@ -852,7 +855,7 @@ class RPAApp(ctk.CTk):
             ws_dist_calc = wb.create_sheet()
             ws_orig      = wb.create_sheet()
 
-            counts, details = cs.build_main_sheet(ws_main, data)
+            counts, details = cs.build_main_sheet(ws_main, data, ut_catalog)
             cs.build_summary_sheet(ws_sum, counts, total)
             cs.build_sucursal_detail_sheet(ws_suc, details)
             cs.build_distribucion_sheet(ws_dist, details)
