@@ -77,9 +77,10 @@ COL_SUCURSAL   = 1
 COL_FACTURA    = 3
 COL_FOLIO      = 20
 COL_GRUPO_CC   = 26
-COL_TOTAL_MX   = 10   # Total en pesos MX
+COL_TOTAL_MX   = 10   # Total en pesos MX (columna K original)
 COL_CC_OC      = 31
 COL_OBS_OC     = 32
+COL_SUBTOTAL_OC = 33  # Subtotal OC — columna AH (RPA), base para distribución
 HEADER_ROW_IDX = 7   # fila 8 del CSV (0-indexed)
 
 # ── Paleta de colores ────────────────────────────────────────────────────
@@ -504,8 +505,9 @@ def build_main_sheet(ws, data):
             "detected": detected,
             "label":    label,
             "fill":     fill,
-            "n_suc":    len(found),
-            "total_mx": safe_get(row_data, COL_TOTAL_MX),
+            "n_suc":       len(found),
+            "total_mx":    safe_get(row_data, COL_TOTAL_MX),
+            "subtotal_oc": safe_get(row_data, COL_SUBTOTAL_OC),
         })
 
     for r_idx, d in enumerate(details, start=2):
@@ -676,14 +678,14 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
         if d["fill"] != FILL_BLUE:
             continue
 
-        total_mx = _parse_amount(d.get("total_mx", ""))
-        dist     = calculate_distribution(d["detected"], d["grupo_cc"], total_mx, catalog)
+        subtotal_oc = _parse_amount(d.get("subtotal_oc", ""))
+        dist        = calculate_distribution(d["detected"], d["grupo_cc"], subtotal_oc, catalog)
 
         if not dist:
             ws.row_dimensions[r].height = 28
             for col, val in enumerate([
                 d["sucursal"], d["factura"], d["folio"], d["grupo_cc"],
-                d["detected"], total_mx if total_mx else "",
+                d["detected"], subtotal_oc if subtotal_oc else "",
                 "— sin catálogo —", "", "",
             ], start=1):
                 _dcell(ws, r, col, val, fill=FILL_GRAY if col == 7 else None)
@@ -694,7 +696,7 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
                 fill_monto = FILL_AMOUNT if monto > 0 else None
                 for col, val in enumerate([
                     d["sucursal"], d["factura"], d["folio"], d["grupo_cc"],
-                    d["detected"], total_mx if total_mx else "",
+                    d["detected"], subtotal_oc if subtotal_oc else "",
                     estacion, f"{pct:.2f}%", monto,
                 ], start=1):
                     _dcell(ws, r, col, val,
