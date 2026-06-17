@@ -847,20 +847,22 @@ class RPAApp(ctk.CTk):
             if ut_catalog:
                 self._log(f"  {len(ut_catalog)} utilitarios cargados.", "info")
 
+            # Crear hojas en el orden de visualización deseado
             wb           = Workbook()
-            ws_main      = wb.active
-            ws_sum       = wb.create_sheet()
-            ws_suc       = wb.create_sheet()
-            ws_dist      = wb.create_sheet()
-            ws_dist_calc = wb.create_sheet()
-            ws_orig      = wb.create_sheet()
+            ws_orig      = wb.active          # 1. Datos Originales
+            ws_sum       = wb.create_sheet()  # 2. Resumen
+            ws_suc       = wb.create_sheet()  # 3. Por Sucursal
+            ws_main      = wb.create_sheet()  # 4. Comparación
+            ws_dist      = wb.create_sheet()  # 5. Distribución
+            ws_dist_calc = wb.create_sheet()  # 6. Distrib. Calculada
 
+            # Llenar en el orden lógico (build_main_sheet produce counts/details)
             counts, details = cs.build_main_sheet(ws_main, data, ut_catalog)
+            cs.build_datos_originales_sheet(ws_orig, header, data)
             cs.build_summary_sheet(ws_sum, counts, total)
             cs.build_sucursal_detail_sheet(ws_suc, details)
             cs.build_distribucion_sheet(ws_dist, details)
             cs.build_distribucion_calculada_sheet(ws_dist_calc, details, catalog)
-            cs.build_datos_originales_sheet(ws_orig, header, data)
 
             out = Path(csv_path).parent / (Path(csv_path).stem + "_comparacion.xlsx")
             wb.save(str(out))

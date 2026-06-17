@@ -843,19 +843,19 @@ def main():
         print(f"  {len(ut_catalog)} utilitarios cargados desde {DISTRIBUCION_DIR.name}/Utilitarios/")
 
     wb = Workbook()
-    ws_main      = wb.active
-    ws_sum       = wb.create_sheet()
-    ws_suc       = wb.create_sheet()
-    ws_dist      = wb.create_sheet()
-    ws_dist_calc = wb.create_sheet()
-    ws_orig      = wb.create_sheet()
+    ws_orig      = wb.active          # 1. Datos Originales
+    ws_sum       = wb.create_sheet()  # 2. Resumen
+    ws_suc       = wb.create_sheet()  # 3. Por Sucursal
+    ws_main      = wb.create_sheet()  # 4. Comparación
+    ws_dist      = wb.create_sheet()  # 5. Distribución
+    ws_dist_calc = wb.create_sheet()  # 6. Distrib. Calculada
 
     counts, details = build_main_sheet(ws_main, data, ut_catalog)
+    build_datos_originales_sheet(ws_orig, header, data)
     build_summary_sheet(ws_sum, counts, len(data))
     build_sucursal_detail_sheet(ws_suc, details)
     build_distribucion_sheet(ws_dist, details)
     build_distribucion_calculada_sheet(ws_dist_calc, details, catalog)
-    build_datos_originales_sheet(ws_orig, header, data)
 
     out_path = csv_path.parent / (csv_path.stem + "_comparacion.xlsx")
     wb.save(str(out_path))
