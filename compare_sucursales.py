@@ -105,8 +105,14 @@ DISTRIBUCION_DIR = Path(__file__).parent / "Distribucion"
 
 # Zona detectada (sin prefijo "ZONA ") → clave GCC en el catálogo
 _ZONA_CATALOG_MAP: dict = {
-    "CLN":      "CULIACAN",       # ZONA CLN  → ZONA CULIACAN
-    "MAZATLAN": "MAZATLAN GRAL",  # ZONA MAZATLAN genérico → Mazatlan_General
+    "CLN":      "CULIACAN",       # ZONA CLN      → CULIACAN
+    "MAZATLAN": "MAZATLAN GRAL",  # ZONA MAZATLAN → Mazatlan_General (genérico)
+    # Abreviaturas MZT
+    "MZT":      "MAZATLAN GRAL",  # ZONA MZT      → Mazatlan_General
+    "MZT 1":    "MAZATLAN 1",
+    "MZT 2":    "MAZATLAN 2",
+    "MZT 3":    "MAZATLAN 3",
+    "MZT 4":    "MAZATLAN 4",
 }
 
 
@@ -519,6 +525,14 @@ def build_main_sheet(ws, data, ut_catalog: dict | None = None):
                 detected = ut_code
                 fill     = FILL_BLUE
                 label    = "DISTRIBUCIÓN (UT)"
+                counts["DISTRIBUCIÓN"] += 1
+            elif _normalize(grupo_cc).startswith("ES_CORPORATIVO"):
+                # Fallback: Petroplazas Corporativo sin sucursal detectada
+                # → distribuir entre todas las estaciones de Corporativo.csv
+                ut_dist_key = "ES_Corporativo"
+                detected    = "ES_Corporativo"
+                fill        = FILL_BLUE
+                label       = "DISTRIBUCIÓN (Corp)"
                 counts["DISTRIBUCIÓN"] += 1
             else:
                 fill     = FILL_GRAY
