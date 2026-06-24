@@ -2,14 +2,15 @@ import openpyxl
 from pathlib import Path
 from typing import List, Tuple
 
-FOLIO_COL        = 4    # Column D  — folio de factura
-CC_COL           = 32   # Column AF — CC OC
-OBS_COL          = 33   # Column AG — Observaciones OC
-SUBTOTAL_COL     = 34   # Column AH — Subtotal OC
-DESCUENTO_COL    = 35   # Column AI — Descuento OC
-IVA_COL          = 36   # Column AJ — IVA (16%) OC
-GASTOS_ENVIO_COL = 37   # Column AK — Gastos de Envío OC
-TOTAL_OC_COL     = 38   # Column AL — Total OC
+FOLIO_COL           = 4    # Column D  — folio de factura
+CC_COL              = 32   # Column AF — CC OC
+OBS_COL             = 33   # Column AG — Observaciones OC
+SUBTOTAL_COL        = 34   # Column AH — Subtotal OC
+DESCUENTO_COL       = 35   # Column AI — Descuento OC
+IVA_COL             = 36   # Column AJ — IVA (16%) OC
+GASTOS_ENVIO_COL    = 37   # Column AK — Gastos de Envío OC
+TOTAL_OC_COL        = 38   # Column AL — Total OC
+CUENTA_CONTABLE_START_COL = 39   # Column AM — primera Cuenta Contable (dinámica)
 HEADER_ROW     = 8
 DATA_START_ROW = 9
 
@@ -54,6 +55,7 @@ class ExcelHandler:
         iva: str = "",
         gastos_envio: str = "",
         total_oc: str = "",
+        cuentas_contables: list = None,
     ):
         self.ws.cell(row=row, column=CC_COL,           value=cc)
         self.ws.cell(row=row, column=OBS_COL,          value=observaciones)
@@ -62,6 +64,12 @@ class ExcelHandler:
         self.ws.cell(row=row, column=IVA_COL,          value=iva)
         self.ws.cell(row=row, column=GASTOS_ENVIO_COL, value=gastos_envio)
         self.ws.cell(row=row, column=TOTAL_OC_COL,     value=total_oc)
+        for i, code in enumerate(cuentas_contables or []):
+            col = CUENTA_CONTABLE_START_COL + i
+            # Escribir header dinámico si aún no existe
+            if not self.ws.cell(row=HEADER_ROW, column=col).value:
+                self.ws.cell(row=HEADER_ROW, column=col, value=f"Cuenta Contable {i + 1}")
+            self.ws.cell(row=row, column=col, value=code)
 
     def save(self):
         self.wb.save(self.filepath)

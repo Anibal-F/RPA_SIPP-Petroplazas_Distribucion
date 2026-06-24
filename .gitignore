@@ -29,3 +29,7 @@ html_pages/
 .venv/
 venv/
 env/
+
+# Archivos de prueba
+TEST_*.xlsx
+_crear_test.py

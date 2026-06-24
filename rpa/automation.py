@@ -137,9 +137,9 @@ class RPAAutomation:
 
                     try:
                         self.log(f"Procesando folio: {folio}", "info")
-                        cc, obs, subtotal, descuento, iva, gastos_envio, total_oc = \
+                        cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables = \
                             await self._process_folio(page, folio)
-                        results.append((row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc))
+                        results.append((row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables))
 
                         if cc:
                             self.log(f"  CC: {cc}", "ok")
@@ -150,7 +150,7 @@ class RPAAutomation:
 
                     except Exception as exc:
                         self.log(f"  Error en folio {folio}: {exc}", "error")
-                        results.append((row_num, "", "", "", "", "", "", ""))
+                        results.append((row_num, "", "", "", "", "", "", "", []))
                         errors += 1
                         await self._recover_page(page)
 
@@ -291,7 +291,7 @@ class RPAAutomation:
     # ──────────────────────────────────────────────────────
     # Step 4 — Process a single folio
     # ──────────────────────────────────────────────────────
-    async def _process_folio(self, page: Page, folio: str) -> Tuple[str, str]:
+    async def _process_folio(self, page: Page, folio: str) -> Tuple:
         # Safety: dismiss any lingering <red-alert> from a previous "no encontrado"
         await self._dismiss_red_alert(page)
 
@@ -307,12 +307,12 @@ class RPAAutomation:
         await page.wait_for_timeout(2_000)
 
         # Check if SIPP showed a "not found" alert and dismiss it
-        _EMPTY7 = ("", "", "", "", "", "", "")
+        _EMPTY8 = ("", "", "", "", "", "", "", [])
 
         if await self._dismiss_red_alert(page):
             self.log(f"  Folio {folio}: no encontrado en SIPP.", "warn")
             self.not_found.append(folio)
-            return _EMPTY7
+            return _EMPTY8
 
         await page.wait_for_timeout(500)
 
@@ -321,7 +321,7 @@ class RPAAutomation:
         if row_count == 0:
             self.log(f"  Folio {folio}: sin resultados en SIPP.", "warn")
             self.not_found.append(folio)
-            return _EMPTY7
+            return _EMPTY8
 
         # ── Click "Visualizar Detalle" on first row ──
         first_row = page.locator("[ng-grid='listadoGrid'] .ngRow").first
@@ -338,7 +338,7 @@ class RPAAutomation:
         )
         await page.wait_for_timeout(1_000)
 
-        # ── Inside the modal, find and extract OC data ──
+        # ── Inside the modal, extract OC data + Cuenta Contable ──
         result = await self._extract_from_visualizar_modal(page)
 
         # Close Visualizar modal
@@ -346,7 +346,7 @@ class RPAAutomation:
         return result
 
     # ──────────────────────────────────────────────────────
-    # Extract CC + Observaciones from "Visualizar Factura" modal
+    # Extract CC + Observaciones + Cuenta Contable from "Visualizar Factura" modal
     # ──────────────────────────────────────────────────────
     async def _extract_from_visualizar_modal(
         self, page: Page
@@ -357,6 +357,7 @@ class RPAAutomation:
         await page.wait_for_timeout(2_500)
 
         # Strategy 1: wait for .ngRow elements inside movimientosDetalleGrid
+        cuentas_contables: list = []
         doc_btn = None
         try:
             await page.wait_for_function(
@@ -371,6 +372,12 @@ class RPAAutomation:
             svc_rows = modal.locator("[ng-grid='movimientosDetalleGrid'] .ngRow")
             count = await svc_rows.count()
             self.log(f"  Servicios: {count} fila(s) en grid.", "info")
+
+            # Extraer TODAS las cuentas contables — el modal ya está completamente cargado
+            cuentas_contables = await self._extract_cuentas_contables(page)
+            if cuentas_contables:
+                self.log(f"  Cuentas Contables ({len(cuentas_contables)}): {', '.join(cuentas_contables)}", "info")
+
             if count > 0:
                 doc_btn = await self._find_btn(
                     svc_rows.first,
@@ -390,8 +397,10 @@ class RPAAutomation:
             if await fallback.count() > 0:
                 doc_btn = fallback
             else:
+                if not cuentas_contables:
+                    cuentas_contables = await self._extract_cuentas_contables(page)
                 self.log("  Sin sección Servicios para este folio.", "warn")
-                return "", "", "", "", "", "", ""
+                return "", "", "", "", "", "", "", cuentas_contables
 
         await doc_btn.click()
 
@@ -406,7 +415,91 @@ class RPAAutomation:
 
         # Close OC document modal
         await self._close_modal(page, "content_modalDocOC")
-        return cc, obs, subtotal, descuento, iva, gastos_envio, total_oc
+        return cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables
+
+    # ──────────────────────────────────────────────────────
+    # Extraer TODAS las Cuentas Contables del modal Visualizar Detalle
+    # ──────────────────────────────────────────────────────
+    async def _extract_cuentas_contables(self, page: Page) -> list:
+        """
+        Extrae todos los códigos de cuenta del apartado 'Cuentas Contables'
+        en el modal #content_modalVisualizar. Retorna lista de strings (dígitos sin guiones).
+        """
+        try:
+            result = await page.evaluate("""() => {
+                const modal = document.querySelector('#content_modalVisualizar');
+                if (!modal) return [];
+                const results = [];
+
+                // --- Estrategia 1: ng-grid que no sea movimiento ni detalle ---
+                const grids = modal.querySelectorAll('[ng-grid]');
+                for (const grid of grids) {
+                    const attr = (grid.getAttribute('ng-grid') || '').toLowerCase();
+                    if (attr.includes('movimiento') || attr.includes('detalle')) continue;
+
+                    const rows = grid.querySelectorAll('.ngRow');
+                    if (rows.length === 0) continue;
+
+                    for (const row of rows) {
+                        let found = '';
+                        for (const inp of row.querySelectorAll('input')) {
+                            const raw = (inp.value || '').trim();
+                            if (!raw) continue;
+                            const stripped = raw.replace(/-/g, '');
+                            if (/^\\d{8,13}$/.test(stripped)) { found = stripped; break; }
+                            // Cuenta cuadre: "CUADRE" al quitar guiones/underscores
+                            if (raw.replace(/[-_\\s]/g, '').toUpperCase().includes('CUADRE')) {
+                                found = raw; break;
+                            }
+                        }
+                        if (!found) {
+                            for (const cell of row.querySelectorAll('.ngCell')) {
+                                const raw = cell.textContent.trim();
+                                if (!raw) continue;
+                                const stripped = raw.replace(/-/g, '');
+                                if (/^\\d{8,13}$/.test(stripped)) { found = stripped; break; }
+                                if (raw.replace(/[-_\\s]/g, '').toUpperCase().includes('CUADRE')) {
+                                    found = raw; break;
+                                }
+                            }
+                        }
+                        if (found) results.push(found);
+                    }
+                    if (results.length > 0) return results;
+                }
+
+                // --- Estrategia 2: tabla HTML con header "Cuenta" ---
+                for (const table of modal.querySelectorAll('table')) {
+                    const headers = Array.from(
+                        table.querySelectorAll('thead th, tr:first-child th')
+                    ).map(h => h.textContent.trim());
+                    const cuentaIdx = headers.findIndex(h => h === 'Cuenta');
+                    if (cuentaIdx < 0) continue;
+
+                    const dataRows = table.querySelectorAll('tbody tr');
+                    for (const row of dataRows) {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length <= cuentaIdx) continue;
+                        const cell = cells[cuentaIdx];
+                        const inp = cell.querySelector('input');
+                        const raw = inp
+                            ? (inp.value || '').trim()
+                            : cell.textContent.trim();
+                        if (!raw) continue;
+                        const stripped = raw.replace(/-/g, '');
+                        if (/^\\d{8,13}$/.test(stripped)) { results.push(stripped); continue; }
+                        if (raw.replace(/[-_\\s]/g, '').toUpperCase().includes('CUADRE')) {
+                            results.push(raw); continue;
+                        }
+                    }
+                    if (results.length > 0) return results;
+                }
+
+                return results;
+            }""")
+            return result if isinstance(result, list) else []
+        except Exception:
+            return []
 
     # ──────────────────────────────────────────────────────
     # Parse CC and Observaciones OC from the OC viewer modal

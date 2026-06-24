@@ -73,22 +73,28 @@ ALIASES: dict = {
 }
 
 # ── Columnas del CSV (0-indexed desde la fila de encabezado) ────────────
-COL_SUCURSAL   = 1
-COL_FACTURA    = 3
-COL_FOLIO      = 20
-COL_GRUPO_CC   = 26
-COL_TOTAL_MX   = 10   # Total en pesos MX (columna K original)
-COL_CC_OC      = 31
-COL_OBS_OC     = 32
-COL_SUBTOTAL_OC = 33  # Subtotal OC — columna AH (RPA), base para distribución
+COL_SUCURSAL        = 1
+COL_FACTURA         = 3
+COL_FOLIO           = 20
+COL_GRUPO_CC        = 26
+COL_TOTAL_MX        = 10   # Total en pesos MX (columna K original)
+COL_CC_OC           = 31
+COL_OBS_OC          = 32
+COL_SUBTOTAL_OC     = 33   # Subtotal OC — columna AH (RPA), base para distribución
+COL_CUENTA_CONTABLE = 38   # Cuenta Contable Factura — columna AM (RPA)
 HEADER_ROW_IDX = 7   # fila 8 del CSV (0-indexed)
 
 # ── Paleta de colores ────────────────────────────────────────────────────
-FILL_GREEN  = PatternFill("solid", fgColor="C6EFCE")   # verde  — MATCH
-FILL_RED    = PatternFill("solid", fgColor="FFC7CE")   # rojo   — MISMATCH
-FILL_BLUE   = PatternFill("solid", fgColor="BDD7EE")   # azul   — DISTRIBUCIÓN
-FILL_GRAY   = PatternFill("solid", fgColor="D9D9D9")   # gris   — SIN SUCURSAL
-FILL_HEADER = PatternFill("solid", fgColor="00264D")   # azul oscuro brand
+FILL_GREEN      = PatternFill("solid", fgColor="C6EFCE")   # verde  — MATCH
+FILL_RED        = PatternFill("solid", fgColor="FFC7CE")   # rojo   — MISMATCH / Sin cuenta
+FILL_BLUE       = PatternFill("solid", fgColor="BDD7EE")   # azul   — DISTRIBUCIÓN
+FILL_GRAY       = PatternFill("solid", fgColor="D9D9D9")   # gris   — SIN SUCURSAL
+FILL_HEADER     = PatternFill("solid", fgColor="00264D")   # azul oscuro brand
+FILL_CC_CATALOG  = PatternFill("solid", fgColor="E2EFDA")   # verde pálido  — Cuenta Catálogo
+FILL_YELLOW_CC   = PatternFill("solid", fgColor="FFEB9C")   # amarillo      — Sin dato SIPP
+FONT_YELLOW_CC   = Font(color="9C5700", bold=True, size=10) # naranja oscuro — Sin dato SIPP
+FILL_ORANGE_CC   = PatternFill("solid", fgColor="FCE4D6")   # naranja pálido — Cuadre
+FONT_ORANGE_CC   = Font(color="C55A11", bold=True, size=10) # naranja oscuro — Cuadre
 
 FONT_HEADER = Font(color="FFFFFF", bold=True, size=10)
 FONT_GREEN  = Font(color="276221", bold=True, size=10)
@@ -98,6 +104,68 @@ FONT_NORMAL = Font(size=10)
 
 THIN   = Side(border_style="thin", color="CCCCCC")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+# ── Catálogo de cuentas contables ────────────────────────────────────────
+
+CUENTAS_GASTOS_CSV      = Path(__file__).parent / "CuentasContables" / "Cuentas_Gastos.csv"
+CUENTAS_PROVEEDORES_CSV = Path(__file__).parent / "CuentasContables" / "Cuentas_Proveedores.csv"
+
+
+def _load_cuentas_csv(path: Path) -> dict:
+    """Lee un CSV de cuentas (Cuenta, Nombre) y retorna {dígitos: (código, nombre)}."""
+    result: dict = {}
+    if not path.exists():
+        return result
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            code = (row.get("Cuenta") or "").strip()
+            name = (row.get("Nombre") or "").strip()
+            if code:
+                digits = re.sub(r"\D", "", code)
+                if digits:
+                    result[digits] = (code, name)
+    return result
+
+
+def load_cuentas_gastos() -> dict:
+    return _load_cuentas_csv(CUENTAS_GASTOS_CSV)
+
+
+def load_cuentas_proveedores() -> dict:
+    return _load_cuentas_csv(CUENTAS_PROVEEDORES_CSV)
+
+
+def load_all_cuentas() -> dict:
+    """Combina gastos + proveedores en un solo catálogo de búsqueda."""
+    catalog = _load_cuentas_csv(CUENTAS_GASTOS_CSV)
+    catalog.update(_load_cuentas_csv(CUENTAS_PROVEEDORES_CSV))
+    return catalog
+
+
+def _lookup_cuenta(cuenta_factura: str, catalog: dict) -> tuple:
+    """
+    Busca cuenta_factura en el catálogo.
+    Retorna (código_catálogo, nombre_catálogo, resultado) donde resultado es:
+      'Match'         — SIPP devolvió cuenta Y existe en el catálogo
+      'Mismatch'      — SIPP devolvió cuenta pero NO existe en el catálogo
+      'Cuadre'        — cuenta de cuadre contable (_CUA-DRE-- u otro con letras/guión bajo)
+      'Sin dato SIPP' — SIPP no devolvió ninguna cuenta
+    """
+    if not cuenta_factura or not cuenta_factura.strip():
+        return ("", "", "Sin dato SIPP")
+    raw = cuenta_factura.strip()
+    # Detectar cuenta cuadre: "CUADRE" presente al quitar guiones/underscores/espacios
+    # Ej: "_CUA-DRE--000000" → "CUADRE000000" → contiene "CUADRE"
+    if "CUADRE" in re.sub(r"[-_\s]", "", raw).upper():
+        return ("", "", "Cuadre")
+    # Guarda contra strings de float como "50299040046.0" → "50299040046"
+    raw = re.sub(r"\.0+$", "", raw)
+    digits = re.sub(r"\D", "", raw)
+    if digits and digits in catalog:
+        code, name = catalog[digits]
+        return (code, name, "Match")
+    return ("", "", "Mismatch")
+
 
 # ── Catálogos de distribución ─────────────────────────────────────────────
 
@@ -414,6 +482,17 @@ def load_csv(filepath: str):
     return header, [r for r in data if any(c.strip() for c in r)]
 
 
+def _cell_to_str(c) -> str:
+    """Convierte un valor de celda openpyxl a str sin perder precisión.
+    float 50299040046.0 → '50299040046'  (evita el '.0' que rompe búsquedas de dígitos)
+    """
+    if c is None:
+        return ""
+    if isinstance(c, float) and c.is_integer():
+        return str(int(c))
+    return str(c)
+
+
 def load_xlsx(filepath: str):
     """Lee un XLSX y devuelve (header, data) en el mismo formato que load_csv."""
     from openpyxl import load_workbook
@@ -421,7 +500,7 @@ def load_xlsx(filepath: str):
     ws = wb.active
     rows = []
     for row in ws.iter_rows(values_only=True):
-        rows.append([str(c) if c is not None else "" for c in row])
+        rows.append([_cell_to_str(c) for c in row])
     wb.close()
     if len(rows) <= HEADER_ROW_IDX:
         return [], []
@@ -647,6 +726,86 @@ def build_summary_sheet(ws, counts, total):
         ws.column_dimensions[col].width = w
 
 
+# ── Hoja de resumen de cuentas contables ─────────────────────────────────
+
+def build_resumen_cuentas_sheet(ws, counts: dict, total: int):
+    ws.title = "Resumen CuentasC"
+
+    ws.merge_cells("A1:D1")
+    c = ws.cell(row=1, column=1, value="RESUMEN DE CONCILIACIÓN CUENTAS CONTABLES")
+    c.fill      = FILL_HEADER
+    c.font      = Font(color="FFFFFF", bold=True, size=13)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells("A2:D2")
+    c2 = ws.cell(row=2, column=1,
+                 value=f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    c2.font      = Font(italic=True, size=10)
+    c2.alignment = Alignment(horizontal="center")
+
+    for col, h in enumerate(["Resultado", "Cantidad", "Porcentaje", "Descripción"], start=1):
+        _hcell(ws, 4, col, h)
+
+    n_match        = counts.get("match", 0)
+    n_mismatch     = counts.get("mismatch", 0)
+    n_cuadre       = counts.get("cuadre", 0)
+    n_sin_dato     = counts.get("sin_dato_sipp", 0)
+
+    table_rows = [
+        (
+            "Match ✓",
+            n_match,
+            FILL_GREEN,
+            FONT_GREEN,
+            "Cuenta contable de SIPP encontrada en el catálogo (gastos o proveedores)",
+        ),
+        (
+            "Mismatch ✗",
+            n_mismatch,
+            FILL_RED,
+            FONT_RED,
+            "SIPP devolvió una cuenta contable pero no existe en el catálogo",
+        ),
+        (
+            "Cuadre",
+            n_cuadre,
+            FILL_ORANGE_CC,
+            FONT_ORANGE_CC,
+            "Cuenta de cuadre contable (_CUA-DRE-- u otra con letras) — no se busca en catálogo",
+        ),
+        (
+            "Sin dato SIPP",
+            n_sin_dato,
+            FILL_YELLOW_CC,
+            FONT_YELLOW_CC,
+            "SIPP no devolvió ninguna cuenta contable para esta factura",
+        ),
+        (
+            "TOTAL",
+            total,
+            FILL_HEADER,
+            FONT_HEADER,
+            "Total de registros procesados",
+        ),
+    ]
+
+    for r, (label, cnt, fill, font, desc) in enumerate(table_rows, start=5):
+        pct = f"{cnt / total * 100:.1f}%" if total else "—"
+        ws.row_dimensions[r].height = 22
+        for col, val in enumerate([label, cnt, pct, desc], start=1):
+            c = ws.cell(row=r, column=col, value=val)
+            c.fill = fill
+            c.font = font
+            c.alignment = Alignment(
+                horizontal="center" if col < 4 else "left", vertical="center"
+            )
+            c.border = BORDER
+
+    for col, w in zip("ABCD", [22, 12, 12, 70]):
+        ws.column_dimensions[col].width = w
+
+
 # ── Hoja por sucursal ────────────────────────────────────────────────────
 
 def build_sucursal_detail_sheet(ws, details):
@@ -794,15 +953,23 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
 
 # Columnas añadidas por el RPA (0-indexed en las filas de datos):
 # 31=CC OC  32=Obs OC  33=Subtotal  34=Descuento  35=IVA  36=G.Envío  37=Total OC
-_RPA_COL_RANGE = range(31, 38)
+# 38+ = Cuenta Contable 1, 2, 3... (dinámicas)
+_RPA_COL_RANGE = range(31, 38)   # solo columnas fijas del RPA (fondo amarillo)
 _RPA_FILL      = PatternFill("solid", fgColor="FFF2CC")   # amarillo pálido
 
 
-def build_datos_originales_sheet(ws, header: list, data: list):
+def build_datos_originales_sheet(
+    ws, header: list, data: list, cuentas_catalog: dict | None = None
+) -> dict:
+    """
+    Construye la hoja 'Datos Originales'.
+    Cada celda de Cuenta Contable se colorea verde (Match) o rojo (Mismatch).
+    Retorna {'match': N, 'mismatch': M, 'sin_dato_sipp': P} contando por celda.
+    """
     ws.title = "Datos Originales"
     ws.freeze_panes = "A2"
 
-    # ── Encabezados ──
+    # ── Encabezados de columnas fuente ──
     ws.row_dimensions[1].height = 24
     for col_idx, h in enumerate(header, start=1):
         c = ws.cell(row=1, column=col_idx, value=h or f"Col{col_idx}")
@@ -811,27 +978,70 @@ def build_datos_originales_sheet(ws, header: list, data: list):
         c.border    = BORDER
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+    # Detectar columnas de Cuenta Contable por nombre de header (0-indexed)
+    cc_col_indices = [
+        i for i, h in enumerate(header)
+        if "Cuenta Contable" in (h or "")
+    ]
+
     # ── Datos ──
+    catalog = cuentas_catalog or {}
+    counts  = {"match": 0, "mismatch": 0, "cuadre": 0, "sin_dato_sipp": 0}
+
     for r_idx, row_data in enumerate(data, start=2):
+        # Escribir todas las columnas fuente
         for col_idx, val in enumerate(row_data, start=1):
             c = ws.cell(row=r_idx, column=col_idx, value=val)
-            c.font   = FONT_NORMAL
-            c.border = BORDER
+            c.font      = FONT_NORMAL
+            c.border    = BORDER
             c.alignment = Alignment(vertical="center")
-            if col_idx - 1 in _RPA_COL_RANGE:   # resaltar columnas del RPA
+            if col_idx - 1 in _RPA_COL_RANGE:
                 c.fill = _RPA_FILL
+
+        # Colorear columnas de Cuenta Contable según catálogo
+        has_any_cuenta = False
+        for cc_i in cc_col_indices:
+            val = safe_get(row_data, cc_i)
+            if not val or not val.strip():
+                continue
+            has_any_cuenta = True
+            _, _, resultado = _lookup_cuenta(val, catalog)
+            if resultado == "Match":
+                fill, font = FILL_GREEN, FONT_GREEN
+                counts["match"] += 1
+            elif resultado == "Cuadre":
+                fill, font = FILL_ORANGE_CC, FONT_ORANGE_CC
+                counts["cuadre"] += 1
+            else:
+                fill, font = FILL_RED, FONT_RED
+                counts["mismatch"] += 1
+            c = ws.cell(row=r_idx, column=cc_i + 1)   # openpyxl es 1-indexed
+            c.fill = fill
+            c.font = font
+
+        if not has_any_cuenta:
+            counts["sin_dato_sipp"] += 1
 
     # ── Anchos de columna ──
     n_cols = max(len(header), max((len(r) for r in data), default=0))
     for i in range(1, n_cols + 1):
         letter = get_column_letter(i)
-        # Columnas del RPA un poco más anchas
-        ws.column_dimensions[letter].width = 28 if (i - 1) in _RPA_COL_RANGE else 14
+        if i - 1 in _RPA_COL_RANGE:
+            ws.column_dimensions[letter].width = 28
+        elif i - 1 in cc_col_indices:
+            ws.column_dimensions[letter].width = 22
+        else:
+            ws.column_dimensions[letter].width = 14
+
+    return counts
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     default_csv = (
         Path(__file__).parent
         / "Recepcion_Facturas"
@@ -847,26 +1057,34 @@ def main():
     header, data = load_file(str(csv_path))
     print(f"  {len(data)} registros cargados.")
 
-    catalog    = load_catalogs(DISTRIBUCION_DIR)
-    ut_catalog = load_utilitario_catalogs(DISTRIBUCION_DIR)
+    catalog        = load_catalogs(DISTRIBUCION_DIR)
+    ut_catalog     = load_utilitario_catalogs(DISTRIBUCION_DIR)
+    all_cuentas    = load_all_cuentas()
+
     if catalog:
         print(f"  {len(catalog)} claves de catálogo cargadas desde {DISTRIBUCION_DIR.name}/")
     else:
         print(f"  [AVISO] No se encontró la carpeta {DISTRIBUCION_DIR} — sin distribución calculada.")
     if ut_catalog:
         print(f"  {len(ut_catalog)} utilitarios cargados desde {DISTRIBUCION_DIR.name}/Utilitarios/")
+    if all_cuentas:
+        print(f"  {len(all_cuentas)} cuentas contables cargadas (gastos + proveedores)")
+    else:
+        print(f"  [AVISO] No se encontraron archivos de cuentas contables.")
 
     wb = Workbook()
     ws_orig      = wb.active          # 1. Datos Originales
     ws_sum       = wb.create_sheet()  # 2. Resumen
-    ws_suc       = wb.create_sheet()  # 3. Por Sucursal
-    ws_main      = wb.create_sheet()  # 4. Comparación
-    ws_dist      = wb.create_sheet()  # 5. Distribución
-    ws_dist_calc = wb.create_sheet()  # 6. Distrib. Calculada
+    ws_sum_cc    = wb.create_sheet()  # 3. Resumen CuentasC
+    ws_suc       = wb.create_sheet()  # 4. Por Sucursal
+    ws_main      = wb.create_sheet()  # 5. Comparación
+    ws_dist      = wb.create_sheet()  # 6. Distribución
+    ws_dist_calc = wb.create_sheet()  # 7. Distrib. Calculada
 
-    counts, details = build_main_sheet(ws_main, data, ut_catalog)
-    build_datos_originales_sheet(ws_orig, header, data)
+    counts, details    = build_main_sheet(ws_main, data, ut_catalog)
+    cc_counts          = build_datos_originales_sheet(ws_orig, header, data, all_cuentas)
     build_summary_sheet(ws_sum, counts, len(data))
+    build_resumen_cuentas_sheet(ws_sum_cc, cc_counts, len(data))
     build_sucursal_detail_sheet(ws_suc, details)
     build_distribucion_sheet(ws_dist, details)
     build_distribucion_calculada_sheet(ws_dist_calc, details, catalog)
@@ -877,12 +1095,18 @@ def main():
     total = len(data)
     print()
     print("══════════════════════════════════════════")
-    print("  RESUMEN")
+    print("  RESUMEN SUCURSALES")
     print(f"  Total registros   : {total}")
     print(f"  MATCH ✓           : {counts['MATCH']}  ({counts['MATCH']/total*100:.1f}%)")
     print(f"  MISMATCH ✗        : {counts['MISMATCH']}  ({counts['MISMATCH']/total*100:.1f}%)")
     print(f"  DISTRIBUCIÓN      : {counts['DISTRIBUCIÓN']}  ({counts['DISTRIBUCIÓN']/total*100:.1f}%)")
     print(f"  Sin sucursal      : {counts['SIN SUCURSAL']}  ({counts['SIN SUCURSAL']/total*100:.1f}%)")
+    print()
+    print("  RESUMEN CUENTAS CONTABLES")
+    print(f"  Match ✓           : {cc_counts['match']}  ({cc_counts['match']/total*100:.1f}%)")
+    print(f"  Mismatch ✗        : {cc_counts['mismatch']}  ({cc_counts['mismatch']/total*100:.1f}%)")
+    print(f"  Cuadre            : {cc_counts.get('cuadre', 0)}  ({cc_counts.get('cuadre', 0)/total*100:.1f}%)")
+    print(f"  Sin dato SIPP     : {cc_counts['sin_dato_sipp']}  ({cc_counts['sin_dato_sipp']/total*100:.1f}%)")
     print("══════════════════════════════════════════")
     print(f"  Archivo generado  : {out_path.name}")
     print("══════════════════════════════════════════")

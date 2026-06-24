@@ -734,8 +734,8 @@ class RPAApp(ctk.CTk):
             if results:
                 self._log("Guardando resultados en Excel…", "info")
                 handler.ensure_headers()
-                for row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc in results:
-                    handler.write_result(row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc)
+                for row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables in results:
+                    handler.write_result(row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables)
                 handler.save()
                 self._log(f"Excel actualizado: {Path(file_path).name}", "ok")
 
@@ -838,28 +838,35 @@ class RPAApp(ctk.CTk):
             total = len(data)
             self._log(f"  {total} registros cargados.", "info")
 
-            catalog    = cs.load_catalogs(cs.DISTRIBUCION_DIR)
-            ut_catalog = cs.load_utilitario_catalogs(cs.DISTRIBUCION_DIR)
+            catalog      = cs.load_catalogs(cs.DISTRIBUCION_DIR)
+            ut_catalog   = cs.load_utilitario_catalogs(cs.DISTRIBUCION_DIR)
+            all_cuentas  = cs.load_all_cuentas()
             if catalog:
                 self._log(f"  {len(catalog)} claves de catálogo de distribución cargadas.", "info")
             else:
                 self._log("  [AVISO] Carpeta Distribucion/ no encontrada — sin cálculo de montos.", "warn")
             if ut_catalog:
                 self._log(f"  {len(ut_catalog)} utilitarios cargados.", "info")
+            if all_cuentas:
+                self._log(f"  {len(all_cuentas)} cuentas contables cargadas (gastos + proveedores).", "info")
+            else:
+                self._log("  [AVISO] Catálogos de cuentas no encontrados — sin conciliación.", "warn")
 
             # Crear hojas en el orden de visualización deseado
             wb           = Workbook()
             ws_orig      = wb.active          # 1. Datos Originales
             ws_sum       = wb.create_sheet()  # 2. Resumen
-            ws_suc       = wb.create_sheet()  # 3. Por Sucursal
-            ws_main      = wb.create_sheet()  # 4. Comparación
-            ws_dist      = wb.create_sheet()  # 5. Distribución
-            ws_dist_calc = wb.create_sheet()  # 6. Distrib. Calculada
+            ws_sum_cc    = wb.create_sheet()  # 3. Resumen CuentasC
+            ws_suc       = wb.create_sheet()  # 4. Por Sucursal
+            ws_main      = wb.create_sheet()  # 5. Comparación
+            ws_dist      = wb.create_sheet()  # 6. Distribución
+            ws_dist_calc = wb.create_sheet()  # 7. Distrib. Calculada
 
             # Llenar en el orden lógico (build_main_sheet produce counts/details)
             counts, details = cs.build_main_sheet(ws_main, data, ut_catalog)
-            cs.build_datos_originales_sheet(ws_orig, header, data)
+            cc_counts       = cs.build_datos_originales_sheet(ws_orig, header, data, all_cuentas)
             cs.build_summary_sheet(ws_sum, counts, total)
+            cs.build_resumen_cuentas_sheet(ws_sum_cc, cc_counts, total)
             cs.build_sucursal_detail_sheet(ws_suc, details)
             cs.build_distribucion_sheet(ws_dist, details)
             cs.build_distribucion_calculada_sheet(ws_dist_calc, details, catalog)
@@ -879,6 +886,12 @@ class RPAApp(ctk.CTk):
             self._log(f"  MISMATCH ✗       : {counts['MISMATCH']}  ({mis_pct:.1f}%)", "error")
             self._log(f"  DISTRIBUCIÓN     : {counts['DISTRIBUCIÓN']}  ({dis_pct:.1f}%)", "warn")
             self._log(f"  Sin sucursal     : {counts['SIN SUCURSAL']}  ({sin_pct:.1f}%)", "info")
+            self._log("─" * 62, "info")
+            self._log("RESUMEN CUENTAS CONTABLES", "info")
+            self._log(f"  Match ✓          : {cc_counts['match']}", "ok")
+            self._log(f"  Mismatch ✗       : {cc_counts['mismatch']}", "error")
+            self._log(f"  Cuadre           : {cc_counts.get('cuadre', 0)}", "warn")
+            self._log(f"  Sin dato SIPP    : {cc_counts['sin_dato_sipp']}", "warn")
             self._log(f"  Archivo generado : {out.name}", "ok")
             self._log("═" * 62, "info")
 
