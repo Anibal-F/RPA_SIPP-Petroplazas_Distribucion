@@ -1,0 +1,363 @@
+Option Explicit
+' ============================================================
+' MAPA DE CAMPOS (basado en archivo Santander de referencia)
+'
+' LÍNEA P (148 chars + CRLF):
+'   [0-2]    "P  "
+'   [3-10]   Fecha yyyymmdd
+'   [11-14]  "    "
+'   [15]     Tipo póliza (1=Ingreso, 2=Egreso, 3=Diario)
+'   [16-39]  "      " + NumPol + " 1 0          "
+'   [40-140] Concepto + padding (101 chars total)
+'   [141-146] "11 0 0"
+'   [147]    " " (trailing space)
+'
+' LÍNEA M (206 chars + CRLF):
+'   [0-2]    "M  "
+'   [3-43]   Cuenta contable + padding (41 chars)
+'   [44]     " "
+'   [45]     Tipo movimiento (0=cargo, 1=abono)
+'   [46]     " "
+'   [47-67]  Importe + padding (21 chars)
+'   [68-81]  "0          0.0"
+'   [82-99]  "                  " (18 espacios fijos)
+'   [100-205] Concepto + trailing padding (106 chars)
+' ============================================================
+Public Sub GenerarPoliza()
+    Dim wsConfig As Worksheet
+    Dim wsEdo As Worksheet
+    Dim wsCat As Worksheet
+    Dim lo As ListObject
+    Dim fechaPol As Date
+    Dim numPolComIVA As Long
+    Dim tipoPolComIVA As Integer
+    Dim ctaBanco As String
+    Dim ctaComisiones As String
+    Dim ctaIVA As String
+    Dim bancoSeleccionado As String
+    Dim colDescripcion As String
+    Dim colCargo As String
+    Dim filaInicio As Long
+    Dim lastRow As Long
+    Dim i As Long
+    Dim descripcion As String
+    Dim tipoMovimiento As String
+    Dim importeCargo As Double
+    Dim totalComisiones As Double
+    Dim totalIVA As Double
+    Dim contenidoComIVA As String
+    Dim hayComIVA As Boolean
+    Dim rutaArchivo As String
+    Dim nombreArchivo As String
+    Dim carpetaDestino As String
+    Dim fileNum As Integer
+
+    On Error GoTo ErrHandler
+
+    Set wsConfig = ThisWorkbook.Worksheets("CONFIG")
+    Set wsEdo = ThisWorkbook.Worksheets("Edo. Cuenta")
+    Set wsCat = ThisWorkbook.Worksheets("Catálogo Conceptos")
+
+    '========================
+    ' VALIDAR CONFIGURACIÓN
+    '========================
+    If Not IsDate(wsConfig.Range("B2").Value) Then
+        MsgBox "La fecha en CONFIG!B2 no es válida.", vbExclamation
+        Exit Sub
+    End If
+    fechaPol = CDate(wsConfig.Range("B2").Value)
+
+    If Not IsNumeric(wsConfig.Range("B3").Value) Then
+        MsgBox "El NumPol de Com&IVA en CONFIG!B3 no es numérico.", vbExclamation
+        Exit Sub
+    End If
+    numPolComIVA = CLng(wsConfig.Range("B3").Value)
+
+    tipoPolComIVA = 2      ' Egreso
+
+        ctaBanco = Trim(CStr(wsConfig.Range("B4").Value))
+    ctaComisiones = Trim(CStr(wsConfig.Range("B5").Value))
+    ctaIVA = Trim(CStr(wsConfig.Range("B6").Value))
+
+    If ctaBanco = "" Or ctaComisiones = "" Or ctaIVA = "" Then
+        MsgBox "Faltan cuentas contables en CONFIG (B4, B5 o B6).", vbExclamation
+        Exit Sub
+    End If
+
+    bancoSeleccionado = Trim(CStr(wsConfig.Range("B7").Value))
+
+    If bancoSeleccionado = "" Then
+        MsgBox "Selecciona un banco en CONFIG!B10.", vbExclamation
+        Exit Sub
+    End If
+    bancoSeleccionado = UCase(Trim(bancoSeleccionado))
+
+    Select Case bancoSeleccionado
+        Case "BANREGIO"
+            colDescripcion = "B"
+            colCargo = "D"
+            filaInicio = 12
+        Case "BBVA", "BBVA 9271"
+            colDescripcion = "B"
+            colCargo = "E"
+            filaInicio = 3
+        Case Else
+            MsgBox "El banco en CONFIG!B10 no es válido. Usa 'BBVA' o 'Banregio'.", vbExclamation
+            Exit Sub
+    End Select
+
+    Set lo = ObtenerTablaConceptos(wsCat)
+    If lo Is Nothing Then
+        MsgBox "No se encontró la tabla de conceptos en 'Catálogo Conceptos'.", vbExclamation
+        Exit Sub
+    End If
+
+    lastRow = wsEdo.Cells(wsEdo.Rows.Count, colDescripcion).End(xlUp).Row
+
+    totalComisiones = 0
+    totalIVA = 0
+    hayComIVA = False
+
+    contenidoComIVA = ConstruirLineaPoliza(fechaPol, tipoPolComIVA, numPolComIVA, _
+                                           "COMISIONES E IVA " & bancoSeleccionado)
+
+    '========================
+    ' RECORRER ESTADO DE CUENTA
+    '========================
+    For i = filaInicio To lastRow
+        descripcion = Trim(CStr(wsEdo.Cells(i, colDescripcion).Value))
+        If descripcion <> "" Then
+            importeCargo = ValorNumerico(wsEdo.Cells(i, colCargo).Value)
+
+            If importeCargo > 0 Then
+                tipoMovimiento = BuscarTipoMovimientoEnTabla(lo, descripcion, bancoSeleccionado)
+                Select Case UCase(tipoMovimiento)
+                    Case "COMISION", "COMISIÓN"
+                        hayComIVA = True
+                        totalComisiones = totalComisiones + importeCargo
+                        contenidoComIVA = contenidoComIVA & _
+                            ConstruirLineaMovimiento(ctaComisiones, 0, importeCargo, "COMISION - " & descripcion) & _
+                            ConstruirLineaMovimiento(ctaBanco, 1, importeCargo, "COMISION - " & descripcion)
+                    Case "IVA"
+                        hayComIVA = True
+                        totalIVA = totalIVA + importeCargo
+                        contenidoComIVA = contenidoComIVA & _
+                            ConstruirLineaMovimiento(ctaIVA, 0, importeCargo, "IVA - " & descripcion) & _
+                            ConstruirLineaMovimiento(ctaBanco, 1, importeCargo, "IVA - " & descripcion)
+                End Select
+            End If
+        End If
+    Next i
+
+    If Not hayComIVA Then
+        MsgBox "No se encontraron comisiones ni IVA para generar la póliza.", vbInformation
+        Exit Sub
+    End If
+
+    '========================
+    ' GUARDAR ARCHIVO TXT
+    '========================
+    If ThisWorkbook.Path = "" Then
+        MsgBox "Primero guarda este archivo de Excel en una carpeta para poder generar el .txt.", vbExclamation
+        Exit Sub
+    End If
+
+    carpetaDestino = ThisWorkbook.Path
+    nombreArchivo = "Polizas_" & bancoSeleccionado & "_" & Format(fechaPol, "yyyymmdd") & ".txt"
+    rutaArchivo = carpetaDestino & Application.PathSeparator & nombreArchivo
+
+    Dim bytes() As Byte
+    bytes = StrConv(contenidoComIVA, vbFromUnicode)
+    fileNum = FreeFile
+    Open rutaArchivo For Binary As #fileNum
+    Put #fileNum, , bytes
+    Close #fileNum
+
+    MsgBox "Archivo generado correctamente." & vbCrLf & vbCrLf & _
+           "Banco: " & bancoSeleccionado & vbCrLf & _
+           "Ruta: " & rutaArchivo & vbCrLf & vbCrLf & _
+           "Comisiones: " & Format(totalComisiones, "#,##0.00") & vbCrLf & _
+           "IVA:        " & Format(totalIVA, "#,##0.00"), vbInformation
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Error al generar póliza: " & Err.Description, vbCritical
+End Sub
+
+' ============================================================
+' LÍNEA P — 148 chars + CRLF
+' ============================================================
+Private Function ConstruirLineaPoliza(ByVal fechaPol As Date, ByVal tipoPoliza As Integer, _
+                                       ByVal numPol As Long, ByVal concepto As String) As String
+    Dim encabezado As String
+    Dim conceptoLimpio As String
+    Dim espaciosConcepto As Long
+    Dim linea As String
+
+    conceptoLimpio = LimpiarConcepto(concepto, 80)
+    encabezado = "P  " & Format(fechaPol, "yyyymmdd") & "    " & tipoPoliza & _
+                 "      " & numPol & " 1 0          "
+    espaciosConcepto = 141 - Len(encabezado) - Len(conceptoLimpio)
+    If espaciosConcepto < 1 Then espaciosConcepto = 1
+    linea = encabezado & conceptoLimpio & Space(espaciosConcepto) & "11 0 0 "
+    ConstruirLineaPoliza = linea & vbCrLf
+End Function
+
+' ============================================================
+' LÍNEA M — 206 chars + CRLF
+' ============================================================
+Private Function ConstruirLineaMovimiento(ByVal cuenta As String, ByVal tipoMov As Integer, _
+                                           ByVal importe As Double, ByVal concepto As String) As String
+    Dim cuentaLimpia As String
+    Dim conceptoLimpio As String
+    Dim importeTxt As String
+    Dim espaciosCuenta As Long
+    Dim espaciosImporte As Long
+    Dim espaciosConcepto As Long
+    Dim linea As String
+
+    cuentaLimpia = LimpiarCuenta(cuenta)
+    conceptoLimpio = LimpiarConcepto(concepto, 80)
+    importeTxt = Replace(Format(importe, "0.00"), ",", "")
+
+    espaciosCuenta = 41 - Len(cuentaLimpia)
+    If espaciosCuenta < 1 Then espaciosCuenta = 1
+    espaciosImporte = 21 - Len(importeTxt)
+    If espaciosImporte < 1 Then espaciosImporte = 1
+    espaciosConcepto = 106 - Len(conceptoLimpio)
+    If espaciosConcepto < 1 Then espaciosConcepto = 1
+
+    linea = "M  " & _
+            cuentaLimpia & Space(espaciosCuenta) & _
+            " " & tipoMov & " " & _
+            importeTxt & Space(espaciosImporte) & _
+            "0          0.0" & _
+            "                  " & _
+            conceptoLimpio & Space(espaciosConcepto)
+    ConstruirLineaMovimiento = linea & vbCrLf
+End Function
+
+' ============================================================
+' FUNCIONES DE SOPORTE
+' ============================================================
+Private Function ObtenerTablaConceptos(ws As Worksheet) As ListObject
+    Dim lo As ListObject
+    On Error Resume Next
+    Set lo = ws.ListObjects("Conceptos_Table")
+    On Error GoTo 0
+    If lo Is Nothing Then
+        On Error Resume Next
+        Set lo = ws.ListObjects("Conceptos_Tab")
+        On Error GoTo 0
+    End If
+    If lo Is Nothing Then
+        If ws.ListObjects.Count > 0 Then Set lo = ws.ListObjects(1)
+    End If
+    Set ObtenerTablaConceptos = lo
+End Function
+
+Private Function BuscarTipoMovimientoEnTabla(lo As ListObject, ByVal descripcionBuscada As String, _
+                                              ByVal bancoBuscado As String) As String
+    Dim rw As ListRow
+    Dim tipo As String
+    Dim descripcionTabla As String
+    Dim bancoTabla As String
+    Dim buscadaNorm As String
+    Dim tablaNorm As String
+    Dim bancoNorm As String
+    Dim bancoTablaNorm As String
+
+    buscadaNorm = NormalizarTexto(descripcionBuscada)
+    bancoNorm = NormalizarTexto(bancoBuscado)
+     If InStr(bancoNorm, " ") > 0 Then bancoNorm = Left(bancoNorm, InStr(bancoNorm, " ") - 1)
+
+    ' 1) Match exacto
+    For Each rw In lo.ListRows
+        tipo = Trim(CStr(rw.Range.Cells(1, lo.ListColumns("Tipo de Movimiento").Index).Value))
+        bancoTabla = Trim(CStr(rw.Range.Cells(1, lo.ListColumns("Banco").Index).Value))
+        descripcionTabla = Trim(CStr(rw.Range.Cells(1, lo.ListColumns("Descripción").Index).Value))
+        tablaNorm = NormalizarTexto(descripcionTabla)
+        bancoTablaNorm = NormalizarTexto(bancoTabla)
+        If bancoTablaNorm = bancoNorm And buscadaNorm = tablaNorm Then
+            BuscarTipoMovimientoEnTabla = tipo
+            Exit Function
+        End If
+    Next rw
+
+    ' 2) Match parcial
+    For Each rw In lo.ListRows
+        tipo = Trim(CStr(rw.Range.Cells(1, lo.ListColumns("Tipo de Movimiento").Index).Value))
+        bancoTabla = Trim(CStr(rw.Range.Cells(1, lo.ListColumns("Banco").Index).Value))
+        descripcionTabla = Trim(CStr(rw.Range.Cells(1, lo.ListColumns("Descripción").Index).Value))
+        tablaNorm = NormalizarTexto(descripcionTabla)
+        bancoTablaNorm = NormalizarTexto(bancoTabla)
+        If bancoTablaNorm = bancoNorm Then
+            If InStr(1, buscadaNorm, tablaNorm, vbTextCompare) > 0 Or _
+               InStr(1, tablaNorm, buscadaNorm, vbTextCompare) > 0 Then
+                BuscarTipoMovimientoEnTabla = tipo
+                Exit Function
+            End If
+        End If
+    Next rw
+
+    BuscarTipoMovimientoEnTabla = ""
+End Function
+
+Private Function NormalizarTexto(ByVal texto As String) As String
+    Dim s As String
+    s = LCase(Trim(texto))
+    s = Replace(s, Chr(225), "a") ' á
+    s = Replace(s, Chr(233), "e") ' é
+    s = Replace(s, Chr(237), "i") ' í
+    s = Replace(s, Chr(243), "o") ' ó
+    s = Replace(s, Chr(250), "u") ' ú
+    s = Replace(s, Chr(252), "u") ' ü
+    s = Replace(s, Chr(241), "n") ' ñ
+    s = Replace(s, vbCr, " ")
+    s = Replace(s, vbLf, " ")
+    s = Replace(s, Chr(160), " ")
+    s = Replace(s, ";", " ")
+    s = Replace(s, ":", " ")
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+    NormalizarTexto = s
+End Function
+
+Private Function ValorNumerico(v As Variant) As Double
+    Dim s As String
+    If IsNumeric(v) Then
+        ValorNumerico = CDbl(v)
+        Exit Function
+    End If
+    s = Trim(CStr(v))
+    If s = "" Or s = "-" Or s = "_" Then
+        ValorNumerico = 0
+        Exit Function
+    End If
+    s = Replace(s, "$", "")
+    s = Replace(s, ",", "")
+    s = Replace(s, " ", "")
+    If IsNumeric(s) Then ValorNumerico = CDbl(s) Else ValorNumerico = 0
+End Function
+
+Private Function LimpiarCuenta(ByVal cuenta As String) As String
+    Dim s As String
+    s = Trim(cuenta)
+    s = Replace(s, "-", "")
+    s = Replace(s, " ", "")
+    LimpiarCuenta = s
+End Function
+
+Private Function LimpiarConcepto(ByVal texto As String, ByVal maxLen As Long) As String
+    Dim s As String
+    s = UCase(Trim(texto))
+    s = Replace(s, vbCr, " ")
+    s = Replace(s, vbLf, " ")
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+    If Len(s) > maxLen Then s = Left(s, maxLen)
+    LimpiarConcepto = s
+End Function
+

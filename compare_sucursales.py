@@ -900,9 +900,11 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
 
     r = 2
     grand_total = 0.0
+    sin_distribucion = []
 
     for d in details:
         if d["fill"] != FILL_BLUE:
+            sin_distribucion.append(d)
             continue
 
         subtotal_oc = _parse_amount(d.get("subtotal_oc", ""))
@@ -914,14 +916,15 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
         else:
             dist = calculate_distribution(d["detected"], d["grupo_cc"], subtotal_oc, catalog)
 
-        if not dist:
+        if not dist or sum(monto for _, _, monto in dist) <= 0:
             ws.row_dimensions[r].height = 28
             for col, val in enumerate([
                 d["sucursal"], d["factura"], d["folio"], d["grupo_cc"],
                 d["detected"], subtotal_oc if subtotal_oc else "",
-                "— sin catálogo —", "", "",
+                "— sin catálogo —", "100.00%", subtotal_oc,
             ], start=1):
                 _dcell(ws, r, col, val, fill=FILL_GRAY if col == 7 else None)
+            grand_total += subtotal_oc
             r += 1
         else:
             for estacion, pct, monto in dist:
@@ -936,6 +939,23 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
                            fill=FILL_BLUE if col == 7 else (fill_monto if col == 9 else None))
                 grand_total += monto
                 r += 1
+
+    # Facturas sin distribución (MATCH / MISMATCH / Sin sucursal) — se listan
+    # al final con su propio subtotal completo, para que el total general de
+    # esta hoja reconcilie con la suma de "Subtotal OC" de Datos Originales.
+    for d in sin_distribucion:
+        subtotal_oc = _parse_amount(d.get("subtotal_oc", ""))
+        if subtotal_oc <= 0:
+            continue
+        ws.row_dimensions[r].height = 25
+        for col, val in enumerate([
+            d["sucursal"], d["factura"], d["folio"], d["grupo_cc"],
+            d["sucursal"], subtotal_oc,
+            "(sin distribución)", "100.00%", subtotal_oc,
+        ], start=1):
+            _dcell(ws, r, col, val, fill=FILL_AMOUNT if col == 9 else None)
+        grand_total += subtotal_oc
+        r += 1
 
     # Fila de total general
     ws.row_dimensions[r].height = 28

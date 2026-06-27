@@ -90,7 +90,10 @@ class RPAAutomation:
     ) -> List[Tuple]:
         """
         Process every (row_num, folio) pair and return list of
-        (row_num, cc, observaciones, subtotal, descuento, iva, gastos_envio, total_oc).
+        (row_num, cc, observaciones, subtotal, descuento, iva, gastos_envio,
+         total_oc, cuentas_contables, poliza_lineas).
+        poliza_lineas: [{"cuenta": str, "cargo": float, "abono": float}, ...]
+        — la póliza de Provisión real que SIPP calculó para la factura.
         """
         results: List[Tuple] = []
 
@@ -117,6 +120,7 @@ class RPAAutomation:
                 processed = 0
                 errors = 0
                 seen: set = set()
+                consecutive_errors = 0
 
                 for row_num, folio in folio_rows:
                     if self.should_cancel():
@@ -137,9 +141,9 @@ class RPAAutomation:
 
                     try:
                         self.log(f"Procesando folio: {folio}", "info")
-                        cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables = \
+                        cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas = \
                             await self._process_folio(page, folio)
-                        results.append((row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables))
+                        results.append((row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas))
 
                         if cc:
                             self.log(f"  CC: {cc}", "ok")
@@ -147,12 +151,40 @@ class RPAAutomation:
                             self.log(f"  Sin datos de OC (folio: {folio})", "warn")
 
                         processed += 1
+                        consecutive_errors = 0
 
                     except Exception as exc:
                         self.log(f"  Error en folio {folio}: {exc}", "error")
-                        results.append((row_num, "", "", "", "", "", "", "", []))
+                        results.append((row_num, "", "", "", "", "", "", "", [], []))
                         errors += 1
+                        consecutive_errors += 1
                         await self._recover_page(page)
+
+                        # 3 fallos seguidos suele significar sesión perdida
+                        # (límite de sesiones concurrentes en SIPP) — un simple
+                        # cierre de alerta/modal no lo arregla. Forzamos
+                        # re-login completo; si tampoco funciona, abortamos
+                        # este worker en vez de quemar el resto de sus folios
+                        # con un fallo garantizado.
+                        if consecutive_errors >= 3:
+                            self.log(
+                                "  3 errores seguidos — posible sesión perdida. "
+                                "Intentando re-login completo...", "warn",
+                            )
+                            try:
+                                await self._login(page)
+                                await self._configure_session(page)
+                                await self._navigate_to_recepcion(page)
+                                consecutive_errors = 0
+                                self.log("  Re-login exitoso, continuando.", "ok")
+                            except Exception as relogin_exc:
+                                self.log(
+                                    f"  Re-login falló ({relogin_exc}). "
+                                    "Abortando este worker — vuelve a correr "
+                                    "los folios restantes con menos workers en paralelo.",
+                                    "error",
+                                )
+                                break
 
                     if on_progress:
                         on_progress(processed, errors, folio)
@@ -307,12 +339,12 @@ class RPAAutomation:
         await page.wait_for_timeout(2_000)
 
         # Check if SIPP showed a "not found" alert and dismiss it
-        _EMPTY8 = ("", "", "", "", "", "", "", [])
+        _EMPTY9 = ("", "", "", "", "", "", "", [], [])
 
         if await self._dismiss_red_alert(page):
             self.log(f"  Folio {folio}: no encontrado en SIPP.", "warn")
             self.not_found.append(folio)
-            return _EMPTY8
+            return _EMPTY9
 
         await page.wait_for_timeout(500)
 
@@ -321,12 +353,32 @@ class RPAAutomation:
         if row_count == 0:
             self.log(f"  Folio {folio}: sin resultados en SIPP.", "warn")
             self.not_found.append(folio)
-            return _EMPTY8
+            return _EMPTY9
 
-        # ── Click "Visualizar Detalle" on first row ──
-        first_row = page.locator("[ng-grid='listadoGrid'] .ngRow").first
+        # SIPP hace match parcial en el filtro de Folio (un folio corto como
+        # "A32" puede traer decenas de resultados que solo lo CONTIENEN).
+        # Localizamos la fila cuyo folio es EXACTAMENTE igual al buscado;
+        # si hay 0 o más de 1 coincidencia exacta, no adivinamos.
+        if row_count > 1:
+            self.log(
+                f"  Folio {folio}: SIPP devolvió {row_count} resultados "
+                "(match parcial) — filtrando por folio exacto...", "warn",
+            )
+
+        row_index = await self._find_exact_folio_row_index(page, folio)
+        if row_index is None:
+            self.log(
+                f"  Folio {folio}: no se encontró una coincidencia EXACTA "
+                f"entre los {row_count} resultado(s) — se omite, revisar manualmente.",
+                "error",
+            )
+            self.not_found.append(folio)
+            return _EMPTY9
+
+        # ── Click "Visualizar Detalle" on the exact-match row ──
+        target_row = page.locator("[ng-grid='listadoGrid'] .ngRow").nth(row_index)
         detail_btn = await self._find_btn(
-            first_row,
+            target_row,
             ["[title='Visualizar Detalle']", "[title*='Detalle']"],
             fallback_index=0,
         )
@@ -346,6 +398,48 @@ class RPAAutomation:
         return result
 
     # ──────────────────────────────────────────────────────
+    # Encontrar la fila con el folio EXACTO entre resultados de match parcial
+    # ──────────────────────────────────────────────────────
+    async def _find_exact_folio_row_index(self, page: Page, folio: str) -> int | None:
+        """
+        listadoGrid puede devolver varios resultados para folios cortos
+        (SIPP hace match parcial, no exacto). Busca entre las .ngRow
+        visibles cuál tiene el folio EXACTO en alguna de sus celdas.
+        Retorna el índice de la única coincidencia exacta, o None si hay
+        0 o más de 1 (ambiguo — no se debe adivinar cuál procesar).
+        """
+        try:
+            indices = await page.evaluate(
+                """(folio) => {
+                    const rows = document.querySelectorAll("[ng-grid='listadoGrid'] .ngRow");
+                    const matches = [];
+                    rows.forEach((row, i) => {
+                        const cells = row.querySelectorAll('.ngCell');
+                        for (const cell of cells) {
+                            if ((cell.textContent || '').trim() === folio) {
+                                matches.push(i);
+                                return;
+                            }
+                        }
+                    });
+                    return matches;
+                }""",
+                folio,
+            )
+        except Exception:
+            return None
+
+        if isinstance(indices, list) and len(indices) == 1:
+            return indices[0]
+        if isinstance(indices, list) and len(indices) > 1:
+            self.log(
+                f"  Folio {folio}: {len(indices)} coincidencias EXACTAS "
+                "(facturas distintas con el mismo folio) — ambiguo, se omite.",
+                "error",
+            )
+        return None
+
+    # ──────────────────────────────────────────────────────
     # Extract CC + Observaciones + Cuenta Contable from "Visualizar Factura" modal
     # ──────────────────────────────────────────────────────
     async def _extract_from_visualizar_modal(
@@ -358,6 +452,7 @@ class RPAAutomation:
 
         # Strategy 1: wait for .ngRow elements inside movimientosDetalleGrid
         cuentas_contables: list = []
+        poliza_lineas: list = []
         doc_btn = None
         try:
             await page.wait_for_function(
@@ -377,6 +472,12 @@ class RPAAutomation:
             cuentas_contables = await self._extract_cuentas_contables(page)
             if cuentas_contables:
                 self.log(f"  Cuentas Contables ({len(cuentas_contables)}): {', '.join(cuentas_contables)}", "info")
+
+            # Póliza real de Provisión que SIPP ya calculó (PolizaGrid: cuenta,
+            # cargo, abono por línea — incluye retenciones reales).
+            poliza_lineas = await self._extract_poliza_lineas(page)
+            if poliza_lineas:
+                self.log(f"  Póliza SIPP: {len(poliza_lineas)} línea(s).", "info")
 
             if count > 0:
                 doc_btn = await self._find_btn(
@@ -399,8 +500,10 @@ class RPAAutomation:
             else:
                 if not cuentas_contables:
                     cuentas_contables = await self._extract_cuentas_contables(page)
+                if not poliza_lineas:
+                    poliza_lineas = await self._extract_poliza_lineas(page)
                 self.log("  Sin sección Servicios para este folio.", "warn")
-                return "", "", "", "", "", "", "", cuentas_contables
+                return "", "", "", "", "", "", "", cuentas_contables, poliza_lineas
 
         await doc_btn.click()
 
@@ -415,7 +518,7 @@ class RPAAutomation:
 
         # Close OC document modal
         await self._close_modal(page, "content_modalDocOC")
-        return cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables
+        return cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas
 
     # ──────────────────────────────────────────────────────
     # Extraer TODAS las Cuentas Contables del modal Visualizar Detalle
@@ -496,6 +599,45 @@ class RPAAutomation:
                 }
 
                 return results;
+            }""")
+            return result if isinstance(result, list) else []
+        except Exception:
+            return []
+
+    # ──────────────────────────────────────────────────────
+    # Extraer la póliza real (PolizaGrid) del modal Visualizar Detalle
+    # ──────────────────────────────────────────────────────
+    async def _extract_poliza_lineas(self, page: Page) -> list:
+        """
+        Lee directamente los inputs de PolizaGrid dentro de
+        #content_modalVisualizar: id_cuenta{N} / im_cargo{N} / im_abono{N}
+        (IDs fijos del cellTemplate de RecepcionFacturas.js, fila por fila).
+        Retorna [{"cuenta": str, "cargo": float, "abono": float}, ...]
+        — la póliza de Provisión que SIPP ya calculó para esta factura
+        (incluye retenciones reales, no inferidas).
+        """
+        try:
+            result = await page.evaluate("""() => {
+                const modal = document.querySelector('#content_modalVisualizar');
+                if (!modal) return [];
+                const parseMonto = (v) => {
+                    if (!v) return 0;
+                    const n = parseFloat(String(v).replace(/[$,\\s]/g, ''));
+                    return isNaN(n) ? 0 : n;
+                };
+                const rows = [];
+                for (let i = 0; i < 200; i++) {
+                    const cuentaInput = modal.querySelector(`#id_cuenta${i}`);
+                    if (!cuentaInput) break;
+                    const cargoInput = modal.querySelector(`#im_cargo${i}`);
+                    const abonoInput = modal.querySelector(`#im_abono${i}`);
+                    const cuenta = (cuentaInput.value || '').trim();
+                    const cargo  = parseMonto(cargoInput ? cargoInput.value : '');
+                    const abono  = parseMonto(abonoInput ? abonoInput.value : '');
+                    if (!cuenta && cargo === 0 && abono === 0) continue;
+                    rows.push({cuenta, cargo, abono});
+                }
+                return rows;
             }""")
             return result if isinstance(result, list) else []
         except Exception:
