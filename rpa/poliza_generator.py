@@ -171,6 +171,13 @@ def load_proveedores_catalog() -> dict[str, str]:
     return catalog
 
 
+_STATION_ALIASES = {
+    "EJERCITO": "GRIJALVA",
+    "CUAHUTEMOC": "CUAUHTEMOC",
+    "LA PAZ": "FORJADORES",
+}
+
+
 def load_estaciones_catalog() -> dict[str, str]:
     """Lee Cuentas_GastoEstaciones.csv. Retorna {nombre_estacion_normalizado: 'XX'}
     a partir de las filas encabezado '502-XX-00-0000' → 'Sucursal (Nombre)'."""
@@ -185,6 +192,9 @@ def load_estaciones_catalog() -> dict[str, str]:
             continue  # solo nos interesan los encabezados de estación
         key = _normalize(re.sub(r"^SUCURSAL\s*\(|\)$", "", nombre.upper()))
         catalog.setdefault(key, segs[1])
+    for alias, canonical in _STATION_ALIASES.items():
+        if canonical in catalog and alias not in catalog:
+            catalog[alias] = catalog[canonical]
     return catalog
 
 
@@ -198,22 +208,22 @@ def _build_p_line(fecha_pol: date, tipo_poliza: int, num_pol: int, concepto: str
     return encabezado + concepto_limpio + (" " * espacios) + "11 0 0 " + "\r\n"
 
 
-def _build_m_line(cuenta: str, tipo_mov: int, importe: float, concepto: str) -> str:
-    cuenta_limpia = _clean_account(cuenta)
-    concepto_limpio = _clean_concept(concepto, 80)
-    importe_txt = f"{importe:.2f}"
-
-    esp_cuenta = max(1, 41 - len(cuenta_limpia))
-    esp_importe = max(1, 21 - len(importe_txt))
-    esp_concepto = max(1, 106 - len(concepto_limpio))
-
+def _build_m_line(cuenta: str, tipo_mov: int, importe: float, concepto: str,
+                   referencia: str = "") -> str:
+    # Formato macrovba2 (Sepsa) — 206 chars + CRLF
+    # "M  "(3) + cuenta(30) + " " + referencia(10) + " " + tipo(1) + " " +
+    # importe(20) + " " + diario(10) + " " + importeME(20) + " " + concepto(100) +
+    # " " + "    " + " " (6 trailing = VBA: " " & ftSpace(" ",4,"D") & " ")
     return (
-        "M  " + cuenta_limpia + (" " * esp_cuenta)
-        + " " + str(tipo_mov) + " "
-        + importe_txt + (" " * esp_importe)
-        + "0          0.0"
-        + (" " * 18)
-        + concepto_limpio + (" " * esp_concepto)
+        "M  "
+        + _clean_account(cuenta).ljust(30)[:30]
+        + " " + _clean_concept(referencia, 10).ljust(10)
+        + " " + str(tipo_mov)
+        + " " + f"{importe:.2f}".ljust(20)[:20]
+        + " " + "0".ljust(10)
+        + " " + "0.0".ljust(20)
+        + " " + _clean_concept(concepto, 100).ljust(100)
+        + "      "
         + "\r\n"
     )
 
@@ -278,6 +288,7 @@ def generar_polizas_almacen(
     total_salida = 0.0
 
     poliza_sipp_idx = idx.get("Poliza SIPP (JSON)")
+    observaciones_idx = idx.get("Observaciones OC")
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         factura = str(row[idx["Factura"]] or "").strip()
@@ -292,25 +303,26 @@ def generar_polizas_almacen(
         if subtotal_oc <= 0:
             continue  # factura sin OC asociada — nada que contabilizar
 
-        concepto = f"{factura} - {proveedor}"
+        observaciones = str(row[observaciones_idx] or "").strip() if observaciones_idx is not None else ""
+        concepto = observaciones if observaciones else f"{factura} - {proveedor}"
 
         # ── Provisión de Almacén ──────────────────────────────────────
         lineas_sipp = _parse_poliza_sipp(row[poliza_sipp_idx]) if poliza_sipp_idx is not None else []
         if lineas_sipp:
             for linea in lineas_sipp:
                 if linea["cargo"] > 0:
-                    mov_provision += _build_m_line(linea["cuenta"], 0, linea["cargo"], concepto)
+                    mov_provision += _build_m_line(linea["cuenta"], 0, linea["cargo"], concepto, factura)
                     total_provision += linea["cargo"]
                 if linea["abono"] > 0:
-                    mov_provision += _build_m_line(linea["cuenta"], 1, linea["abono"], concepto)
+                    mov_provision += _build_m_line(linea["cuenta"], 1, linea["abono"], concepto, factura)
             con_poliza_sipp += 1
         else:
-            mov_provision += _build_m_line(CUENTA_TRANSITO, 0, subtotal_oc, concepto)
+            mov_provision += _build_m_line(CUENTA_TRANSITO, 0, subtotal_oc, concepto, factura)
             abono_provision = subtotal_oc
             if iva_oc > 0:
-                mov_provision += _build_m_line(CUENTA_IVA_DEFAULT, 0, iva_oc, concepto)
+                mov_provision += _build_m_line(CUENTA_IVA_DEFAULT, 0, iva_oc, concepto, factura)
                 abono_provision += iva_oc
-            mov_provision += _build_m_line(CUENTA_PROVEEDORES, 1, abono_provision, concepto)
+            mov_provision += _build_m_line(CUENTA_PROVEEDORES, 1, abono_provision, concepto, factura)
             total_provision += abono_provision
 
         # ── Entrada / Salida de Almacén (requieren cuenta de almacén) ──
@@ -332,8 +344,8 @@ def generar_polizas_almacen(
             if sucursal:
                 sucursales_sin_almacen[sucursal] = None
         else:
-            mov_entrada += _build_m_line(cuenta_almacen, 0, monto_real, concepto)
-            mov_entrada += _build_m_line(CUENTA_TRANSITO, 1, monto_real, concepto)
+            mov_entrada += _build_m_line(cuenta_almacen, 0, monto_real, concepto, factura)
+            mov_entrada += _build_m_line(CUENTA_TRANSITO, 1, monto_real, concepto, factura)
             total_entrada += monto_real
 
             cuentas = [
@@ -342,8 +354,8 @@ def generar_polizas_almacen(
             if not cuentas:
                 sin_cuenta_gasto.append(f"{factura} ({proveedor}) — sin cuenta contable SIPP")
             else:
-                mov_salida += _build_m_line(cuentas[0], 0, monto_real, concepto)
-                mov_salida += _build_m_line(cuenta_almacen, 1, monto_real, concepto)
+                mov_salida += _build_m_line(cuentas[0], 0, monto_real, concepto, factura)
+                mov_salida += _build_m_line(cuenta_almacen, 1, monto_real, concepto, factura)
                 total_salida += monto_real
 
         procesadas += 1
@@ -489,9 +501,7 @@ def generar_poliza_individual(
         observaciones = (
             str(row[observaciones_idx] or "").strip() if observaciones_idx is not None else ""
         )
-        concepto = f"{factura} - {proveedor}"
-        if observaciones:
-            concepto = f"{concepto} - {observaciones}"
+        concepto = observaciones if observaciones else f"{factura} - {proveedor}"
 
         fecha_raw = row[fecha_factura_idx] if fecha_factura_idx is not None else None
         fecha_mov, uso_fallback = _parse_fecha_factura(fecha_raw, fecha_poliza)
@@ -559,18 +569,18 @@ def generar_poliza_individual(
                         if monto == 0:
                             continue
                         nueva_cuenta = cuenta_limpia[:3] + codigo + cuenta_limpia[5:]
-                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto)
+                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto, factura)
                 else:
-                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto)
+                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto, factura)
 
             if linea["abono"] > 0:
                 if cuenta_limpia in (_clean_account(CUENTA_PROVEEDORES), _clean_account(CUENTA_TRANSITO)):
                     abono_proveedor_total += linea["abono"]
                 else:
-                    mov_factura += _build_m_line(cuenta, 1, linea["abono"], concepto)
+                    mov_factura += _build_m_line(cuenta, 1, linea["abono"], concepto, factura)
 
         if abono_proveedor_total > 0:
-            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_proveedor_total, concepto)
+            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_proveedor_total, concepto, factura)
 
         movimientos_por_fecha[fecha_mov] = movimientos_por_fecha.get(fecha_mov, "") + mov_factura
         total_poliza += cargo_total
@@ -608,12 +618,14 @@ def generar_poliza_individual(
     # mismo .txt rompe la importación a partir del segundo bloque. Mismo
     # NumPol en todos los archivos. ──
     archivos: list[dict] = []
+    num_actual = num_poliza
     for fecha_bloque in sorted(movimientos_por_fecha.keys()):
         concepto_bloque = f"POLIZA INDIVIDUAL {fecha_bloque.strftime('%d/%m/%Y')}"
         fecha_tag_bloque = fecha_bloque.strftime("%Y%m%d")
         out_path = out_dir / f"Poliza_Individual_{fecha_tag_bloque}.txt"
-        _write_poliza(out_path, fecha_bloque, tipo_poliza, num_poliza,
+        _write_poliza(out_path, fecha_bloque, tipo_poliza, num_actual,
                       concepto_bloque, movimientos_por_fecha[fecha_bloque])
+        num_actual += 1
         lineas_m = [l for l in movimientos_por_fecha[fecha_bloque].split("\r\n") if l.startswith("M  ")]
         total_cargo = sum(_parse_amount(l.split()[3]) for l in lineas_m if l.split()[2] == "0")
         total_abono = sum(_parse_amount(l.split()[3]) for l in lineas_m if l.split()[2] == "1")
@@ -650,4 +662,235 @@ def generar_poliza_individual(
         "sin_proveedor": sin_proveedor,
         "proveedores_sin_cuenta": list(proveedores_sin_cuenta.keys()),
         "sin_fecha_factura": sin_fecha_factura,
+    }
+
+
+def generar_poliza_proveedores(
+    xlsx_path: str,
+    output_dir: str | None = None,
+    fecha_poliza: date | None = None,
+    num_poliza: int = 1,
+    tipo_poliza: int = TIPO_DIARIO,
+    log_fn: Callable = print,
+) -> dict:
+    """Genera UNA póliza por proveedor identificado:
+      - Cargo : cuentas de gasto + IVA/retenciones (de la póliza SIPP real).
+                Las cuentas 502-99 se distribuyen por estación igual que en
+                la póliza Individual.
+      - Abono : cuenta individual del proveedor (Cuentas_Proveedores.csv).
+
+    Genera un TXT por proveedor, comprimidos en un ZIP.
+    """
+    fecha_poliza = fecha_poliza or date.today()
+    fecha_txt = fecha_poliza.strftime("%d/%m/%Y")
+    out_dir = Path(output_dir) if output_dir else Path(xlsx_path).parent
+
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    hojas_requeridas = ["Datos Originales", "Distrib. Calculada"]
+    faltantes_hojas = [h for h in hojas_requeridas if h not in wb.sheetnames]
+    if faltantes_hojas:
+        raise ValueError(
+            f"El archivo no tiene la(s) hoja(s) {faltantes_hojas}. "
+            "Usa el .xlsx generado por el botón COMPARAR."
+        )
+
+    ws_orig = wb["Datos Originales"]
+    header = [c.value for c in ws_orig[1]]
+    idx = {h: i for i, h in enumerate(header) if h}
+    required = ["Sucursal", "Proveedor", "Factura", "Subtotal OC"]
+    faltantes_cols = [c for c in required if c not in idx]
+    if faltantes_cols:
+        raise ValueError(
+            f"Faltan columnas {faltantes_cols} en 'Datos Originales'. "
+            "¿Ya corriste el RPA sobre este archivo antes de comparar?"
+        )
+    poliza_sipp_idx = idx.get("Poliza SIPP (JSON)")
+    if poliza_sipp_idx is None:
+        raise ValueError(
+            "El archivo no tiene la columna 'Poliza SIPP (JSON)' — el esquema "
+            "Proveedores requiere pólizas SIPP reales capturadas por el RPA."
+        )
+
+    # ── Distrib. Calculada → {factura: [(estacion, pct), ...]} ──────────
+    ws_dist = wb["Distrib. Calculada"]
+    dist_header = [c.value for c in ws_dist[1]]
+    dist_idx = {h: i for i, h in enumerate(dist_header) if h}
+    distrib_por_factura: dict[str, list[tuple[str, float]]] = {}
+    for row in ws_dist.iter_rows(min_row=2, values_only=True):
+        factura = str(row[dist_idx["Factura"]] or "").strip()
+        if not factura:
+            continue
+        estacion = str(row[dist_idx["Estación Distribuida"]] or "").strip()
+        if _normalize(estacion) == _normalize("(sin distribución)"):
+            estacion = str(row[dist_idx["Sucursal"]] or "").strip()
+        pct = _parse_amount(row[dist_idx["% Distribución"]])
+        if not estacion or pct <= 0:
+            continue
+        distrib_por_factura.setdefault(factura, []).append((estacion, pct))
+
+    estaciones_catalog = load_estaciones_catalog()
+    proveedores_catalog = load_proveedores_catalog()
+    observaciones_idx = idx.get("Observaciones OC")
+
+    movimientos_por_proveedor: dict[str, str] = {}
+    procesadas = 0
+    total_poliza = 0.0
+    sin_poliza_sipp: list[str] = []
+    sin_estacion: list[str] = []
+    estaciones_sin_cuenta: dict[str, None] = {}
+    sin_proveedor: list[str] = []
+    proveedores_sin_cuenta: dict[str, None] = {}
+
+    for row in ws_orig.iter_rows(min_row=2, values_only=True):
+        factura = str(row[idx["Factura"]] or "").strip()
+        if not factura:
+            continue
+
+        sucursal = str(row[idx["Sucursal"]] or "").strip()
+        proveedor = str(row[idx["Proveedor"]] or "").strip()
+        subtotal_oc = _parse_amount(row[idx["Subtotal OC"]])
+        if subtotal_oc <= 0:
+            continue
+
+        lineas_sipp = _parse_poliza_sipp(row[poliza_sipp_idx])
+        if not lineas_sipp:
+            sin_poliza_sipp.append(f"{factura} ({proveedor})")
+            continue
+
+        observaciones = (
+            str(row[observaciones_idx] or "").strip() if observaciones_idx is not None else ""
+        )
+        concepto = observaciones if observaciones else f"{factura} - {proveedor}"
+
+        distrib = distrib_por_factura.get(factura) or [(sucursal, 100.0)]
+
+        # ── Resolver código de estación ──
+        partes_resueltas: list[tuple[str, float]] = []
+        estacion_faltante = False
+        for estacion, pct in distrib:
+            codigo = _match_catalog(estacion, estaciones_catalog)
+            if not codigo:
+                estacion_faltante = True
+                estaciones_sin_cuenta[estacion] = None
+            else:
+                partes_resueltas.append((codigo, pct))
+        if estacion_faltante:
+            sin_estacion.append(f"{factura} ({proveedor})")
+            continue
+
+        # ── Resolver cuenta de proveedor individual ──
+        cuenta_proveedor = _match_catalog(proveedor, proveedores_catalog)
+        if not cuenta_proveedor:
+            sin_proveedor.append(f"{factura} ({proveedor})")
+            proveedores_sin_cuenta[proveedor] = None
+            continue
+
+        # ── Construir movimientos: cargo de SIPP, abono a proveedor ──
+        mov_factura = ""
+        cargo_total = 0.0
+        abono_total = 0.0
+
+        for linea in lineas_sipp:
+            cuenta = linea["cuenta"]
+            cuenta_limpia = _clean_account(cuenta)
+            es_gasto_global = (
+                len(cuenta_limpia) == 11
+                and cuenta_limpia[:3] == "502"
+                and cuenta_limpia[3:5] == "99"
+            )
+
+            if linea["cargo"] > 0:
+                cargo_total += linea["cargo"]
+                if es_gasto_global and partes_resueltas:
+                    montos = []
+                    acumulado = 0.0
+                    for _, pct in partes_resueltas[:-1]:
+                        m = round(linea["cargo"] * pct / 100, 2)
+                        montos.append(m)
+                        acumulado += m
+                    montos.append(round(linea["cargo"] - acumulado, 2))
+                    for (codigo, _), monto in zip(partes_resueltas, montos):
+                        if monto == 0:
+                            continue
+                        nueva_cuenta = cuenta_limpia[:3] + codigo + cuenta_limpia[5:]
+                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto, factura)
+                else:
+                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto, factura)
+
+            if linea["abono"] > 0:
+                # Todos los abonos de SIPP se consolidan en la cuenta del proveedor
+                abono_total += linea["abono"]
+
+        if abono_total > 0:
+            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_total, concepto, factura)
+
+        movimientos_por_proveedor[proveedor] = movimientos_por_proveedor.get(proveedor, "") + mov_factura
+        total_poliza += cargo_total
+        procesadas += 1
+
+    if sin_poliza_sipp:
+        log_fn(f"  Sin póliza SIPP real (omitidas): {len(sin_poliza_sipp)}", "warn")
+        for o in sin_poliza_sipp[:20]:
+            log_fn(f"    - {o}", "warn")
+    if sin_estacion:
+        log_fn(f"  Sin cuenta de estación (omitidas): {len(sin_estacion)}", "warn")
+        for o in sin_estacion[:20]:
+            log_fn(f"    - {o}", "warn")
+    if sin_proveedor:
+        log_fn(f"  Sin cuenta de proveedor (omitidas): {len(sin_proveedor)}", "warn")
+        for o in sin_proveedor[:20]:
+            log_fn(f"    - {o}", "warn")
+
+    if procesadas == 0:
+        raise ValueError(
+            "No se encontraron facturas con póliza SIPP real para generar la "
+            "póliza Proveedores."
+        )
+
+    archivos: list[dict] = []
+    num_actual = num_poliza
+    for proveedor_nombre in sorted(movimientos_por_proveedor.keys()):
+        movimientos = movimientos_por_proveedor[proveedor_nombre]
+        concepto_poliza = f"PROVEEDORES {_clean_concept(proveedor_nombre, 55)} {fecha_txt}"
+        safe_nombre = re.sub(r'[<>:"/\\|?*]', "_", proveedor_nombre)[:50]
+        fecha_tag = fecha_poliza.strftime("%Y%m%d")
+        out_path = out_dir / f"Poliza_Proveedores_{safe_nombre}_{fecha_tag}.txt"
+        _write_poliza(out_path, fecha_poliza, tipo_poliza, num_actual, concepto_poliza, movimientos)
+        num_actual += 1
+
+        lineas_m = [l for l in movimientos.split("\r\n") if l.startswith("M  ")]
+        total_cargo = sum(_parse_amount(l.split()[3]) for l in lineas_m if len(l.split()) > 3 and l.split()[2] == "0")
+        total_abono = sum(_parse_amount(l.split()[3]) for l in lineas_m if len(l.split()) > 3 and l.split()[2] == "1")
+        archivos.append({"path": str(out_path), "proveedor": proveedor_nombre, "total": round(total_cargo, 2)})
+        log_fn(f"  {out_path.name}  (${total_cargo:,.2f})", "ok")
+        if round(total_cargo - total_abono, 2) != 0:
+            log_fn(
+                f"    ⚠ NO CUADRA: cargo ${total_cargo:,.2f} vs abono ${total_abono:,.2f} "
+                f"(diferencia ${total_cargo - total_abono:,.2f}) — Contpaq puede rechazar este archivo.",
+                "error",
+            )
+
+    fecha_tag = fecha_poliza.strftime("%Y%m%d")
+    zip_path = out_dir / f"Polizas_Proveedores_{fecha_tag}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for a in archivos:
+            zf.write(a["path"], arcname=Path(a["path"]).name)
+    log_fn(f"  Comprimido: {zip_path.name} ({len(archivos)} proveedor(es))", "ok")
+
+    log_fn(
+        f"Póliza Proveedores generada a partir de {procesadas} factura(s) "
+        f"en {len(archivos)} proveedor(es).",
+        "info",
+    )
+
+    return {
+        "procesadas": procesadas,
+        "archivos": archivos,
+        "zip_path": str(zip_path),
+        "total": round(total_poliza, 2),
+        "sin_poliza_sipp": sin_poliza_sipp,
+        "sin_estacion": sin_estacion,
+        "estaciones_sin_cuenta": list(estaciones_sin_cuenta.keys()),
+        "sin_proveedor": sin_proveedor,
+        "proveedores_sin_cuenta": list(proveedores_sin_cuenta.keys()),
     }

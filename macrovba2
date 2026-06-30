@@ -1,0 +1,209 @@
+Private Sub btnImportarFacturas_Click()
+Dim Reg As Integer, TotReg As Integer
+Dim Ruta As String, nomFile As String, XML As Variant
+Dim Comprobante, Emisor, Receptor, Conceptos, Impuestos, Complemento
+    'Limpieza de Informacion
+    If Range("B6") <> "" Then
+        TotReg = Range("B5").End(xlDown).Row
+        Range("A6:Z" & TotReg).ClearContents
+    End If
+    Reg = 6
+    'Lectura de Facturas
+    Ruta = ActiveWorkbook.Path & "\Facturas\"
+    nomFile = Dir(Ruta & "*.xml", vbArchive)
+    While Len(nomFile) > 0
+        DoEvents
+        'Lectura de XML
+        XML = CreateObject("Scripting.FileSystemObject").GetFile(Ruta & nomFile).OpenAsTextStream(1, 0).ReadAll
+        Comprobante = DecodeXML(XML, "cfdi:Comprobante")
+        Emisor = DecodeXML(XML, "cfdi:Emisor")
+        Receptor = DecodeXML(XML, "cfdi:Receptor")
+        Conceptos = DecodeXML(XML, "cfdi:Conceptos")
+        Impuestos = DecodeXML(XML, "cfdi:Impuestos")
+        Complemento = DecodeXML(XML, "cfdi:Complemento")
+        'Generacion de Registro
+        Cells(Reg, 2) = DecodeNodo(Complemento, "Calle")
+        Cells(Reg, 3) = DecodeNodo(Complemento, "PolizaRespCivil")
+        Cells(Reg, 4) = dFecha(DecodeNodo(Comprobante, "Fecha"))
+        Cells(Reg, 5) = DecodeNodo(Complemento, "FechaTimbrado")
+        Cells(Reg, 6) = DecodeNodo(Comprobante, "Serie") & Format(DecodeNodo(Comprobante, "Folio"), "000000")
+        Cells(Reg, 7) = DecodeNodo(Comprobante, " SubTotal")
+        Cells(Reg, 8) = DecodeNodo(Impuestos, "TotalImpuestosTrasladados")
+        Cells(Reg, 9) = DecodeNodo(Impuestos, "TotalImpuestosRetenidos")
+        Cells(Reg, 10) = DecodeNodo(Comprobante, " Total")
+        Cells(Reg, 11) = DecodeNodo(Complemento, "UUID")
+        Set XML = Nothing
+        Cells(Reg, 1) = BuscarEstacion(Cells(Reg, 2))
+        Reg = Reg + 1
+        nomFile = Dir()
+    Wend
+    MsgBox "Importacion Exitosa ..."
+End Sub
+
+Private Function DecodeXML(ByVal XML As String, ByVal Nodo As String) As String
+Dim PosIni As Integer, PosFin As Integer
+    DecodeXML = ""
+    On Error Resume Next
+    PosIni = InStr(XML, "<" & Nodo)
+    PosFin = InStr(XML, "</" & Nodo)
+    If Nodo = "cfdi:Impuestos" Then
+        XML = Mid(XML, PosFin + Len(Nodo))
+        PosIni = InStr(XML, "<" & Nodo)
+        PosFin = InStr(XML, "</" & Nodo)
+    End If
+    If PosIni > 0 And PosFin > 0 Then
+        If InStr(Nodo, "Comprobante") > 0 Then
+            PosFin = InStr(XML, "<cfdi:Emisor")
+            DecodeXML = Mid(XML, PosIni, PosFin - PosIni) & "</" & Nodo & ">"
+        Else
+            DecodeXML = Mid(XML, PosIni, PosFin - PosIni + Len(Nodo) + 3)
+        End If
+    ElseIf PosIni > 0 And PosFin = 0 Then
+        XML = Mid(XML, PosIni)
+        PosFin = InStr(XML, "/>")
+        DecodeXML = Mid(XML, 1, PosFin + 3)
+    End If
+End Function
+
+Private Function DecodeNodo(ByVal XML As String, ByVal Nodo As String) As String
+Dim Cadena As String
+    DecodeNodo = ""
+    On Error Resume Next
+    If InStr(XML, Nodo) > 0 Then
+        Cadena = Mid(XML, InStr(XML, Nodo) + Len(Nodo) + 2)
+        DecodeNodo = Mid(Cadena, 1, InStr(Cadena, """") - 1)
+    End If
+End Function
+
+Private Function dFecha(ByVal fechaTimbre As String) As Date
+    dFecha = Mid(fechaTimbre, 1, 10)
+End Function
+
+Private Function BuscarEstacion(ByVal Calle As String) As String
+Dim Reg As Integer, TotReg As Integer, tEst As Worksheet
+    BuscarEstacion = ""
+    Set tEst = Sheets("CatEstaciones")
+    TotReg = tEst.Range("B1").End(xlDown).Row
+    For Reg = 2 To TotReg
+        DoEvents
+        If Calle = tEst.Range("A" & Reg) Then
+            BuscarEstacion = tEst.Range("B" & Reg)
+            Exit For
+        End If
+    Next Reg
+    Set tEst = Nothing
+End Function
+
+Private Sub btnPoliza_Click()
+Dim Reg As Integer, TotReg As Integer, Estacion As String
+Dim FecPol As String, NumPol As String, Concepto As String, Tipo As String, Clase As String, Diario As String
+Dim Buffer As String, ImporteME As String
+Dim IvaPAcred As String, IvaRet As String, Prv As String
+Dim nFile As Integer, Archivo As String
+    'Organizar de la A-Z
+    'ActiveWorkbook.Worksheets("RecoleccionFactura").AutoFilter.Sort.SortFields.Clear
+    'ActiveWorkbook.Worksheets("RecoleccionFactura").AutoFilter.Sort.SortFields. _
+    '    Add2 Key:=Range("A5"), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal
+    'With ActiveWorkbook.Worksheets("RecoleccionFactura").AutoFilter.Sort
+    '    .Header = xlYes
+    '    .MatchCase = False
+    '    .Orientation = xlTopToBottom
+    '    .SortMethod = xlPinYin
+    '    .Apply
+    'End With
+    'Generar Poliza por Estacion
+    IvaPAcred = ftSpace(ftGuion(Sheets("Generales").Range("C9")), 30, "I")
+    IvaRet = ftSpace(ftGuion(Sheets("Generales").Range("C10")), 30, "I")
+    Prv = ftSpace(ftGuion(Sheets("Generales").Range("C11")), 30, "I")
+    Tipo = ftSpace("3", 4, "D") '1=Ingreso, 2=Egreso, 3=Diario
+    Clase = "1"
+    Diario = ftSpace("0", 10, "I")
+    ImporteME = ftSpace("0.0", 20, "I")
+    
+    'Abrir la poliza
+    With Sheets("Generales")
+        FecPol = Format(.Range("C3"), "YYYYMMDD")
+        NumPol = ftSpace(.Range("C4"), 9, "D")
+        Concepto = ftSpace(.Range("C5") & " de " & Format(.Range("C3"), "mmm, YYYY"), 100, "I")
+    End With
+    Buffer = "P  " & FecPol & " " & Tipo & " " & NumPol & " " & Clase & " " & Diario & " " & Concepto & " 11 0 0 "
+    TotReg = Range("C5").End(xlDown).Row
+    For Reg = 6 To TotReg
+        DoEvents
+        Range("A" & Reg).Select
+        If Range("A" & Reg) <> "" Then
+            'Registrar Movimiento
+            Referencia = ftSpace(Range("F" & Reg), 10, "I")
+            Concepto = ftSpace(Sheets("Generales").Range("C5") & " " & Range("A" & Reg), 100, "I")
+            'Cargo Flete por Traslado
+            TipoMov = "0"
+            Cuenta = ftSpace(ftGuion(BuscarCuenta(Range("A" & Reg))), 30, "I")
+            Importe = ftSpace(Format(Range("G" & Reg).Value, "###0.0#"), 20, "I")
+            Buffer = Buffer & Chr(13) & Chr(10) & "M  " & Cuenta & " " & Referencia & " " & TipoMov & " " & Importe & " " & Diario & " " & ImporteME & " " & Concepto & " " & ftSpace(" ", 4, "D") & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AM " & Range("K" & Reg) & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AD " & Range("K" & Reg) & " "
+            'Cargo Iva por Acreditar
+            TipoMov = "0"
+            Cuenta = IvaPAcred
+            Importe = ftSpace(Format(Range("H" & Reg).Value, "###0.0#"), 20, "I")
+            Buffer = Buffer & Chr(13) & Chr(10) & "M  " & Cuenta & " " & Referencia & " " & TipoMov & " " & Importe & " " & Diario & " " & ImporteME & " " & Concepto & " " & ftSpace(" ", 4, "D") & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AM " & Range("K" & Reg) & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AD " & Range("K" & Reg) & " "
+            'Abono Iva Retencion
+            TipoMov = "1"
+            Cuenta = IvaRet
+            Importe = ftSpace(Format(Range("I" & Reg).Value, "###0.0#"), 20, "I")
+            Buffer = Buffer & Chr(13) & Chr(10) & "M  " & Cuenta & " " & Referencia & " " & TipoMov & " " & Importe & " " & Diario & " " & ImporteME & " " & Concepto & " " & ftSpace(" ", 4, "D") & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AM " & Range("K" & Reg) & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AD " & Range("K" & Reg) & " "
+            'Abono Proveedor (Sepsa)
+            TipoMov = "1"
+            Cuenta = Prv
+            Importe = ftSpace(Format(Range("J" & Reg).Value, "###0.0#"), 20, "I")
+            Buffer = Buffer & Chr(13) & Chr(10) & "M  " & Cuenta & " " & Referencia & " " & TipoMov & " " & Importe & " " & Diario & " " & ImporteME & " " & Concepto & " " & ftSpace(" ", 4, "D") & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AM " & Range("K" & Reg) & " "
+            Buffer = Buffer & Chr(13) & Chr(10) & "AD " & Range("K" & Reg) & " "
+        End If
+    Next Reg
+    If Buffer <> "" Then
+        'Cerrar Poliza
+        nFile = FreeFile
+        Archivo = ActiveWorkbook.Path & "\Poliza_Sepsa_" & Format(Sheets("Generales").Range("C3"), "DD_MM_YYYY") & ".txt"
+        Open Archivo For Output As #nFile
+        Print #nFile, Buffer
+        Close #nFile
+    End If
+    Range("A6").Select
+    MsgBox "Poliza Generada ..."
+End Sub
+
+Private Function BuscarCuenta(ByVal Estacion As String) As String
+Dim Reg As Integer, TotReg As Integer, tEst As Worksheet
+    BuscarCuenta = ""
+    Set tEst = Sheets("CatEstaciones")
+    TotReg = tEst.Range("B1").End(xlDown).Row
+    For Reg = 2 To TotReg
+        DoEvents
+        If Estacion = tEst.Range("B" & Reg) Then
+            BuscarCuenta = tEst.Range("C" & Reg)
+            Exit For
+        End If
+    Next Reg
+    Set tEst = Nothing
+End Function
+
+Private Function ftGuion(ByVal Rubro As String) As String
+    ftGuion = Replace(Rubro, "-", "")
+End Function
+
+Private Function ftSpace(ByVal Valor As String, ByVal Size As Integer, ByVal Hori As String) As String
+Dim x As Integer
+    If Hori = "" Then Hori = "D"
+    If Hori = "I" Then
+        ftSpace = Valor & String(Size, " ")
+        ftSpace = Mid(ftSpace, 1, Size)
+    ElseIf Hori = "D" Then
+        ftSpace = String(Size, " ") & Valor
+        ftSpace = Mid(ftSpace, Len(ftSpace) - Size + 1, 500)
+    End If
+End Function

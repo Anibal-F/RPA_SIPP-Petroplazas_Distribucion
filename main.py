@@ -1066,7 +1066,8 @@ class RPAApp:
             content=ft.Column(
                 [
                     ft.Radio(value="sipp", label="SIPP — Provisión/Entrada/Salida (cuentas globales)"),
-                    ft.Radio(value="individual", label="Individual — 1 póliza, cuentas por estación + proveedor real"),
+                    ft.Radio(value="individual", label="Individual — 1 póliza por fecha, cuentas por estación + proveedor real"),
+                    ft.Radio(value="proveedores", label="Proveedores — 1 póliza por proveedor, cargo gasto/IVA, abono proveedor"),
                 ],
                 spacing=2,
             ),
@@ -1146,6 +1147,8 @@ class RPAApp:
         try:
             if esquema == "individual":
                 self._poliza_blocking_individual(xlsx_path, num_poliza)
+            elif esquema == "proveedores":
+                self._poliza_blocking_proveedores(xlsx_path, num_poliza)
             else:
                 self._poliza_blocking_sipp(xlsx_path, num_poliza)
         except Exception as exc:
@@ -1162,8 +1165,8 @@ class RPAApp:
         resultado = generar_polizas_almacen(
             xlsx_path,
             num_poliza_provision=num_poliza,
-            num_poliza_entrada=num_poliza,
-            num_poliza_salida=num_poliza,
+            num_poliza_entrada=num_poliza + 1,
+            num_poliza_salida=num_poliza + 2,
             log_fn=self._log,
         )
 
@@ -1205,6 +1208,39 @@ class RPAApp:
 
         self.status_text = (
             f"Póliza Individual generada — {resultado['procesadas']} factura(s)  |  "
+            f"{len(resultado['sin_estacion']) + len(resultado['sin_proveedor']) + len(resultado['sin_poliza_sipp'])} omitida(s)"
+        )
+        self.status_lbl.value = self.status_text
+        self.page.update()
+
+        if resultado.get("estaciones_sin_cuenta") or resultado.get("proveedores_sin_cuenta"):
+            self._show_missing_individual_dialog(
+                resultado.get("estaciones_sin_cuenta") or [],
+                resultado.get("proveedores_sin_cuenta") or [],
+            )
+
+    def _poliza_blocking_proveedores(self, xlsx_path: str, num_poliza: int):
+        from rpa.poliza_generator import generar_poliza_proveedores
+
+        resultado = generar_poliza_proveedores(
+            xlsx_path,
+            num_poliza=num_poliza,
+            log_fn=self._log,
+        )
+
+        self._log("═" * 62, "info")
+        self._log("RESUMEN PÓLIZA PROVEEDORES", "info")
+        self._log(f"  Facturas procesadas      : {resultado['procesadas']}", "ok")
+        self._log(f"  Proveedores generados    : {len(resultado['archivos'])} (uno por proveedor)", "ok")
+        self._log(f"  Comprimido (.zip)        : {Path(resultado['zip_path']).name}", "ok")
+        self._log(f"  Sin póliza SIPP real     : {len(resultado['sin_poliza_sipp'])}", "warn")
+        self._log(f"  Sin cuenta de estación   : {len(resultado['sin_estacion'])}", "warn")
+        self._log(f"  Sin cuenta de proveedor  : {len(resultado['sin_proveedor'])}", "warn")
+        self._log("═" * 62, "info")
+
+        self.status_text = (
+            f"Póliza Proveedores — {resultado['procesadas']} factura(s)  |  "
+            f"{len(resultado['archivos'])} proveedor(es)  |  "
             f"{len(resultado['sin_estacion']) + len(resultado['sin_proveedor']) + len(resultado['sin_poliza_sipp'])} omitida(s)"
         )
         self.status_lbl.value = self.status_text
