@@ -898,8 +898,8 @@ class RPAApp:
             if results:
                 self._log("Guardando resultados en Excel…", "info")
                 handler.ensure_headers()
-                for row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas in results:
-                    handler.write_result(row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas)
+                for row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, folio_fiscal, cuentas_contables, poliza_lineas in results:
+                    handler.write_result(row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, folio_fiscal, cuentas_contables, poliza_lineas)
                 handler.save()
                 self._log(f"Excel actualizado: {Path(file_path).name}", "ok")
 

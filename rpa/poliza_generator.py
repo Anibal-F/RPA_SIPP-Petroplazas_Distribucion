@@ -208,12 +208,29 @@ def _build_p_line(fecha_pol: date, tipo_poliza: int, num_pol: int, concepto: str
     return encabezado + concepto_limpio + (" " * espacios) + "11 0 0 " + "\r\n"
 
 
+def _build_am_ad_lines(folio_fiscal: str) -> str:
+    """
+    Líneas de asociación de CFDI para Contpaq, tomadas de la macro VBA de
+    referencia (macrovba2): después de cada movimiento M se agregan
+        AM <UUID>           (Asocia el comprobante fiscal al movimiento)
+        AD <UUID>           (Asocia el documento digital)
+    para que Contpaq vincule la factura automáticamente. Sin UUID no se emite
+    nada (no rompe pólizas de facturas sin folio fiscal capturado).
+    """
+    uuid = str(folio_fiscal or "").strip().upper()
+    if not uuid:
+        return ""
+    return "AM " + uuid + " \r\n" + "AD " + uuid + " \r\n"
+
+
 def _build_m_line(cuenta: str, tipo_mov: int, importe: float, concepto: str,
-                   referencia: str = "") -> str:
+                   referencia: str = "", folio_fiscal: str = "") -> str:
     # Formato macrovba2 (Sepsa) — 206 chars + CRLF
     # "M  "(3) + cuenta(30) + " " + referencia(10) + " " + tipo(1) + " " +
     # importe(20) + " " + diario(10) + " " + importeME(20) + " " + concepto(100) +
     # " " + "    " + " " (6 trailing = VBA: " " & ftSpace(" ",4,"D") & " ")
+    # Si la factura trae folio fiscal (UUID), se anexan las líneas AM/AD para
+    # que Contpaq asocie el CFDI al movimiento automáticamente.
     return (
         "M  "
         + _clean_account(cuenta).ljust(30)[:30]
@@ -225,6 +242,7 @@ def _build_m_line(cuenta: str, tipo_mov: int, importe: float, concepto: str,
         + " " + _clean_concept(concepto, 100).ljust(100)
         + "      "
         + "\r\n"
+        + _build_am_ad_lines(folio_fiscal)
     )
 
 
@@ -289,6 +307,7 @@ def generar_polizas_almacen(
 
     poliza_sipp_idx = idx.get("Poliza SIPP (JSON)")
     observaciones_idx = idx.get("Observaciones OC")
+    folio_fiscal_idx = idx.get("Folio Fiscal")
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         factura = str(row[idx["Factura"]] or "").strip()
@@ -299,6 +318,7 @@ def generar_polizas_almacen(
         proveedor = str(row[idx["Proveedor"]] or "").strip()
         subtotal_oc = _parse_amount(row[idx["Subtotal OC"]])
         iva_oc = _parse_amount(row[idx["IVA OC"]])
+        folio_fiscal = str(row[folio_fiscal_idx] or "").strip() if folio_fiscal_idx is not None else ""
 
         if subtotal_oc <= 0:
             continue  # factura sin OC asociada — nada que contabilizar
@@ -311,18 +331,18 @@ def generar_polizas_almacen(
         if lineas_sipp:
             for linea in lineas_sipp:
                 if linea["cargo"] > 0:
-                    mov_provision += _build_m_line(linea["cuenta"], 0, linea["cargo"], concepto, factura)
+                    mov_provision += _build_m_line(linea["cuenta"], 0, linea["cargo"], concepto, factura, folio_fiscal)
                     total_provision += linea["cargo"]
                 if linea["abono"] > 0:
-                    mov_provision += _build_m_line(linea["cuenta"], 1, linea["abono"], concepto, factura)
+                    mov_provision += _build_m_line(linea["cuenta"], 1, linea["abono"], concepto, factura, folio_fiscal)
             con_poliza_sipp += 1
         else:
-            mov_provision += _build_m_line(CUENTA_TRANSITO, 0, subtotal_oc, concepto, factura)
+            mov_provision += _build_m_line(CUENTA_TRANSITO, 0, subtotal_oc, concepto, factura, folio_fiscal)
             abono_provision = subtotal_oc
             if iva_oc > 0:
-                mov_provision += _build_m_line(CUENTA_IVA_DEFAULT, 0, iva_oc, concepto, factura)
+                mov_provision += _build_m_line(CUENTA_IVA_DEFAULT, 0, iva_oc, concepto, factura, folio_fiscal)
                 abono_provision += iva_oc
-            mov_provision += _build_m_line(CUENTA_PROVEEDORES, 1, abono_provision, concepto, factura)
+            mov_provision += _build_m_line(CUENTA_PROVEEDORES, 1, abono_provision, concepto, factura, folio_fiscal)
             total_provision += abono_provision
 
         # ── Entrada / Salida de Almacén (requieren cuenta de almacén) ──
@@ -344,8 +364,8 @@ def generar_polizas_almacen(
             if sucursal:
                 sucursales_sin_almacen[sucursal] = None
         else:
-            mov_entrada += _build_m_line(cuenta_almacen, 0, monto_real, concepto, factura)
-            mov_entrada += _build_m_line(CUENTA_TRANSITO, 1, monto_real, concepto, factura)
+            mov_entrada += _build_m_line(cuenta_almacen, 0, monto_real, concepto, factura, folio_fiscal)
+            mov_entrada += _build_m_line(CUENTA_TRANSITO, 1, monto_real, concepto, factura, folio_fiscal)
             total_entrada += monto_real
 
             cuentas = [
@@ -354,8 +374,8 @@ def generar_polizas_almacen(
             if not cuentas:
                 sin_cuenta_gasto.append(f"{factura} ({proveedor}) — sin cuenta contable SIPP")
             else:
-                mov_salida += _build_m_line(cuentas[0], 0, monto_real, concepto, factura)
-                mov_salida += _build_m_line(cuenta_almacen, 1, monto_real, concepto, factura)
+                mov_salida += _build_m_line(cuentas[0], 0, monto_real, concepto, factura, folio_fiscal)
+                mov_salida += _build_m_line(cuenta_almacen, 1, monto_real, concepto, factura, folio_fiscal)
                 total_salida += monto_real
 
         procesadas += 1
@@ -471,6 +491,7 @@ def generar_poliza_individual(
 
     observaciones_idx = idx.get("Observaciones OC")
     fecha_factura_idx = idx.get("Fecha Factura")
+    folio_fiscal_idx = idx.get("Folio Fiscal")
 
     movimientos_por_fecha: dict[date, str] = {}
     procesadas = 0
@@ -502,6 +523,7 @@ def generar_poliza_individual(
             str(row[observaciones_idx] or "").strip() if observaciones_idx is not None else ""
         )
         concepto = observaciones if observaciones else f"{factura} - {proveedor}"
+        folio_fiscal = str(row[folio_fiscal_idx] or "").strip() if folio_fiscal_idx is not None else ""
 
         fecha_raw = row[fecha_factura_idx] if fecha_factura_idx is not None else None
         fecha_mov, uso_fallback = _parse_fecha_factura(fecha_raw, fecha_poliza)
@@ -569,18 +591,18 @@ def generar_poliza_individual(
                         if monto == 0:
                             continue
                         nueva_cuenta = cuenta_limpia[:3] + codigo + cuenta_limpia[5:]
-                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto, factura)
+                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto, factura, folio_fiscal)
                 else:
-                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto, factura)
+                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto, factura, folio_fiscal)
 
             if linea["abono"] > 0:
                 if cuenta_limpia in (_clean_account(CUENTA_PROVEEDORES), _clean_account(CUENTA_TRANSITO)):
                     abono_proveedor_total += linea["abono"]
                 else:
-                    mov_factura += _build_m_line(cuenta, 1, linea["abono"], concepto, factura)
+                    mov_factura += _build_m_line(cuenta, 1, linea["abono"], concepto, factura, folio_fiscal)
 
         if abono_proveedor_total > 0:
-            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_proveedor_total, concepto, factura)
+            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_proveedor_total, concepto, factura, folio_fiscal)
 
         movimientos_por_fecha[fecha_mov] = movimientos_por_fecha.get(fecha_mov, "") + mov_factura
         total_poliza += cargo_total
@@ -731,6 +753,7 @@ def generar_poliza_proveedores(
     estaciones_catalog = load_estaciones_catalog()
     proveedores_catalog = load_proveedores_catalog()
     observaciones_idx = idx.get("Observaciones OC")
+    folio_fiscal_idx = idx.get("Folio Fiscal")
 
     movimientos_por_proveedor: dict[str, str] = {}
     procesadas = 0
@@ -761,6 +784,7 @@ def generar_poliza_proveedores(
             str(row[observaciones_idx] or "").strip() if observaciones_idx is not None else ""
         )
         concepto = observaciones if observaciones else f"{factura} - {proveedor}"
+        folio_fiscal = str(row[folio_fiscal_idx] or "").strip() if folio_fiscal_idx is not None else ""
 
         distrib = distrib_por_factura.get(factura) or [(sucursal, 100.0)]
 
@@ -813,16 +837,16 @@ def generar_poliza_proveedores(
                         if monto == 0:
                             continue
                         nueva_cuenta = cuenta_limpia[:3] + codigo + cuenta_limpia[5:]
-                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto, factura)
+                        mov_factura += _build_m_line(nueva_cuenta, 0, monto, concepto, factura, folio_fiscal)
                 else:
-                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto, factura)
+                    mov_factura += _build_m_line(cuenta, 0, linea["cargo"], concepto, factura, folio_fiscal)
 
             if linea["abono"] > 0:
                 # Todos los abonos de SIPP se consolidan en la cuenta del proveedor
                 abono_total += linea["abono"]
 
         if abono_total > 0:
-            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_total, concepto, factura)
+            mov_factura += _build_m_line(cuenta_proveedor, 1, abono_total, concepto, factura, folio_fiscal)
 
         movimientos_por_proveedor[proveedor] = movimientos_por_proveedor.get(proveedor, "") + mov_factura
         total_poliza += cargo_total

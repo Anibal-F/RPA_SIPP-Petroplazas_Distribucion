@@ -974,7 +974,7 @@ def build_distribucion_calculada_sheet(ws, details, catalog):
 # Columnas añadidas por el RPA (0-indexed en las filas de datos):
 # 31=CC OC  32=Obs OC  33=Subtotal  34=Descuento  35=IVA  36=G.Envío  37=Total OC
 # 38+ = Cuenta Contable 1, 2, 3... (dinámicas)
-_RPA_COL_RANGE = range(31, 38)   # solo columnas fijas del RPA (fondo amarillo)
+_RPA_COL_RANGE = range(31, 39)   # columnas fijas del RPA (fondo amarillo): CC..Folio Fiscal
 _RPA_FILL      = PatternFill("solid", fgColor="FFF2CC")   # amarillo pálido
 
 

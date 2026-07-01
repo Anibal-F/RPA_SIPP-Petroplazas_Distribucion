@@ -62,6 +62,79 @@ _JS_GRID_ROW_COUNT = """(gridAttr) => {
     return grid ? grid.querySelectorAll('.ngRow').length : 0;
 }"""
 
+# Folio Fiscal (UUID del CFDI). El nombre del XML "F_<UUID>.xml" suele estar en
+# el title del botón XML, pero en el modal de detalle a veces no se renderiza;
+# por eso buscamos también en el scope de Angular (dirxml / ProveedoresFacturasSoporte
+# / documento), que son objetos de la factura ACTUAL.
+_JS_FOLIO_FISCAL = r"""() => {
+    const uuidRe = /[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/;
+    const grab = (s) => { if (s == null) return ''; const m = String(s).match(uuidRe); return m ? m[0] : ''; };
+
+    // 1) DOM: title del botón XML de la factura
+    for (const el of document.querySelectorAll('[title]')) {
+        const tt = el.getAttribute('title') || '';
+        if (/F_/i.test(tt)) { const u = grab(tt); if (u) return u; }
+    }
+
+    // 2) El dato de la factura vive en un scope HIJO del modal (el modal sólo
+    //    es el contenedor). Recorremos todos los scopes — incl. isolate scopes
+    //    de <ver-archivo> cuyo binding 'filename' es "F_<UUID>.xml".
+    try {
+        const root = document.querySelector('#content_modalVisualizar') || document.body;
+        const els = [root].concat(Array.prototype.slice.call(root.querySelectorAll('*')));
+        const seen = new Set();
+        for (const el of els) {
+            for (const getter of ['scope', 'isolateScope']) {
+                let sc;
+                try { sc = angular.element(el)[getter](); } catch (e) { continue; }
+                if (!sc || seen.has(sc.$id)) continue;
+                seen.add(sc.$id);
+
+                let u = grab(sc.filename)
+                     || grab(sc.dirxml && (sc.dirxml.nombre || sc.dirxml.Nombre))
+                     || grab(sc.dirxml);
+                if (u) return u;
+
+                const pf = sc.ProveedoresFacturasSoporte;
+                if (pf && pf.length) {
+                    for (const f of pf) {
+                        u = grab(f && (f.UUID || f.uuid || f.nombre)) || grab(JSON.stringify(f || ''));
+                        if (u) return u;
+                    }
+                }
+                const d = sc.documento;
+                if (d) { u = grab(d.UUID || d.NU_UUID || d.uuid); if (u) return u; }
+            }
+        }
+    } catch (e) {}
+
+    return '';
+}"""
+
+_JS_FOLIO_FISCAL_DIAG = r"""() => {
+    const out = {vaCount: 0, va: []};
+    try {
+        const vas = document.querySelectorAll('ver-archivo');
+        out.vaCount = vas.length;
+        Array.prototype.slice.call(vas, 0, 6).forEach((va) => {
+            const info = {dir: va.getAttribute('dir')};
+            try {
+                const iso = angular.element(va).isolateScope();
+                if (iso) info.iso = {filename: iso.filename, dir: iso.dir, local: iso.local};
+            } catch (e) { info.isoErr = String(e); }
+            try {
+                const sc = angular.element(va).scope();
+                if (sc) {
+                    info.parentKeys = Object.keys(sc).filter(k => !k.startsWith('$')).slice(0, 25);
+                    info.dirxml = sc.dirxml ? JSON.stringify(sc.dirxml).slice(0, 120) : String(sc.dirxml);
+                }
+            } catch (e) { info.scErr = String(e); }
+            out.va.push(info);
+        });
+    } catch (e) { out.err = String(e); }
+    return JSON.stringify(out);
+}"""
+
 
 class RPAAutomation:
     def __init__(
@@ -85,13 +158,14 @@ class RPAAutomation:
     # ──────────────────────────────────────────────────────
     async def run(
         self,
-        folio_rows: List[Tuple[int, str]],
+        folio_rows: List[Tuple[int, str, str]],
         on_progress: Callable = None,
     ) -> List[Tuple]:
         """
-        Process every (row_num, folio) pair and return list of
+        Process every (row_num, folio, fecha_factura) tuple and return list of
         (row_num, cc, observaciones, subtotal, descuento, iva, gastos_envio,
-         total_oc, cuentas_contables, poliza_lineas).
+         total_oc, folio_fiscal, cuentas_contables, poliza_lineas).
+        folio_fiscal: UUID del TimbreFiscalDigital extraído del XML (CFDI).
         poliza_lineas: [{"cuenta": str, "cargo": float, "abono": float}, ...]
         — la póliza de Provisión real que SIPP calculó para la factura.
         """
@@ -122,12 +196,13 @@ class RPAAutomation:
                 seen: set = set()
                 consecutive_errors = 0
 
-                for row_num, folio in folio_rows:
+                for row_num, folio, fecha_factura in folio_rows:
                     if self.should_cancel():
                         self.log("Proceso cancelado por el usuario.", "warn")
                         break
 
                     folio = str(folio).strip()
+                    expected_period = self._parse_period(fecha_factura)
 
                     # Duplicate guard
                     if folio in seen:
@@ -141,9 +216,9 @@ class RPAAutomation:
 
                     try:
                         self.log(f"Procesando folio: {folio}", "info")
-                        cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas = \
-                            await self._process_folio(page, folio)
-                        results.append((row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas))
+                        cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, folio_fiscal, cuentas_contables, poliza_lineas = \
+                            await self._process_folio(page, folio, expected_period)
+                        results.append((row_num, cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, folio_fiscal, cuentas_contables, poliza_lineas))
 
                         if cc:
                             self.log(f"  CC: {cc}", "ok")
@@ -155,7 +230,7 @@ class RPAAutomation:
 
                     except Exception as exc:
                         self.log(f"  Error en folio {folio}: {exc}", "error")
-                        results.append((row_num, "", "", "", "", "", "", "", [], []))
+                        results.append((row_num, "", "", "", "", "", "", "", "", [], []))
                         errors += 1
                         consecutive_errors += 1
                         await self._recover_page(page)
@@ -323,7 +398,9 @@ class RPAAutomation:
     # ──────────────────────────────────────────────────────
     # Step 4 — Process a single folio
     # ──────────────────────────────────────────────────────
-    async def _process_folio(self, page: Page, folio: str) -> Tuple:
+    async def _process_folio(
+        self, page: Page, folio: str, expected_period: tuple | None = None
+    ) -> Tuple:
         # Safety: dismiss any lingering <red-alert> from a previous "no encontrado"
         await self._dismiss_red_alert(page)
 
@@ -339,7 +416,7 @@ class RPAAutomation:
         await page.wait_for_timeout(2_000)
 
         # Check if SIPP showed a "not found" alert and dismiss it
-        _EMPTY9 = ("", "", "", "", "", "", "", [], [])
+        _EMPTY9 = ("", "", "", "", "", "", "", "", [], [])
 
         if await self._dismiss_red_alert(page):
             self.log(f"  Folio {folio}: no encontrado en SIPP.", "warn")
@@ -365,11 +442,12 @@ class RPAAutomation:
                 "(match parcial) — filtrando por folio exacto...", "warn",
             )
 
-        row_index = await self._find_exact_folio_row_index(page, folio)
+        row_index = await self._find_exact_folio_row_index(page, folio, expected_period)
         if row_index is None:
             self.log(
                 f"  Folio {folio}: no se encontró una coincidencia EXACTA "
-                f"entre los {row_count} resultado(s) — se omite, revisar manualmente.",
+                f"para el periodo esperado entre los {row_count} resultado(s) "
+                "— se omite, revisar manualmente.",
                 "error",
             )
             self.not_found.append(folio)
@@ -400,44 +478,115 @@ class RPAAutomation:
     # ──────────────────────────────────────────────────────
     # Encontrar la fila con el folio EXACTO entre resultados de match parcial
     # ──────────────────────────────────────────────────────
-    async def _find_exact_folio_row_index(self, page: Page, folio: str) -> int | None:
+    async def _find_exact_folio_row_index(
+        self, page: Page, folio: str, expected_period: tuple | None = None
+    ) -> int | None:
         """
         listadoGrid puede devolver varios resultados para folios cortos
         (SIPP hace match parcial, no exacto). Busca entre las .ngRow
         visibles cuál tiene el folio EXACTO en alguna de sus celdas.
-        Retorna el índice de la única coincidencia exacta, o None si hay
-        0 o más de 1 (ambiguo — no se debe adivinar cuál procesar).
+
+        Cuando hay varias coincidencias exactas (mismo folio reutilizado en
+        años distintos), se desambigua por PERIODO: solo se conservan las filas
+        cuya fecha (dd/mm/yyyy en alguna celda) cae en expected_period=(año, mes)
+        — tomado de 'Fecha Factura' del Excel. Así un folio repetido en 2022 se
+        descarta y se procesa únicamente el de junio 2026.
+
+        Retorna el índice de la única coincidencia válida, o None si hay 0
+        (no existe en el periodo) o >1 (ambiguo — no se adivina).
         """
         try:
-            indices = await page.evaluate(
+            matches = await page.evaluate(
                 """(folio) => {
+                    const dateRe = /\\b(\\d{2})\\/(\\d{2})\\/(\\d{4})\\b/g;
                     const rows = document.querySelectorAll("[ng-grid='listadoGrid'] .ngRow");
-                    const matches = [];
+                    const out = [];
                     rows.forEach((row, i) => {
                         const cells = row.querySelectorAll('.ngCell');
+                        let isMatch = false;
+                        let rowText = '';
                         for (const cell of cells) {
-                            if ((cell.textContent || '').trim() === folio) {
-                                matches.push(i);
-                                return;
-                            }
+                            const t = (cell.textContent || '').trim();
+                            rowText += ' ' + t;
+                            if (t === folio) isMatch = true;
                         }
+                        if (!isMatch) return;
+                        const dates = [];
+                        let m;
+                        while ((m = dateRe.exec(rowText)) !== null) {
+                            dates.push([parseInt(m[3], 10), parseInt(m[2], 10)]); // [año, mes]
+                        }
+                        out.push({i: i, dates: dates});
                     });
-                    return matches;
+                    return out;
                 }""",
                 folio,
             )
         except Exception:
             return None
 
-        if isinstance(indices, list) and len(indices) == 1:
-            return indices[0]
-        if isinstance(indices, list) and len(indices) > 1:
-            self.log(
-                f"  Folio {folio}: {len(indices)} coincidencias EXACTAS "
-                "(facturas distintas con el mismo folio) — ambiguo, se omite.",
-                "error",
-            )
+        if not isinstance(matches, list) or len(matches) == 0:
+            return None
+
+        # Una sola coincidencia exacta: caso normal, no hay nada que desambiguar.
+        if len(matches) == 1:
+            return matches[0]["i"]
+
+        # Varias coincidencias exactas → desambiguar por periodo si lo tenemos.
+        self.log(
+            f"  Folio {folio}: {len(matches)} coincidencias EXACTAS "
+            "(mismo folio en periodos distintos).",
+            "warn",
+        )
+
+        if expected_period:
+            anyo, mes = expected_period
+            con_fecha = [m for m in matches if m["dates"]]
+            # Solo filtramos si al menos una fila trae fecha legible.
+            if con_fecha:
+                en_periodo = [
+                    m for m in con_fecha
+                    if any(d[0] == anyo and d[1] == mes for d in m["dates"])
+                ]
+                if len(en_periodo) == 1:
+                    self.log(
+                        f"  Folio {folio}: desambiguado por periodo "
+                        f"{mes:02d}/{anyo} → 1 coincidencia.", "ok",
+                    )
+                    return en_periodo[0]["i"]
+                if len(en_periodo) == 0:
+                    self.log(
+                        f"  Folio {folio}: ninguna coincidencia en el periodo "
+                        f"{mes:02d}/{anyo} — se omite.", "error",
+                    )
+                    return None
+                self.log(
+                    f"  Folio {folio}: {len(en_periodo)} coincidencias EN "
+                    f"{mes:02d}/{anyo} — sigue ambiguo, se omite.", "error",
+                )
+                return None
+
+        self.log(
+            f"  Folio {folio}: no se pudo desambiguar por periodo "
+            "(sin fecha esperada o sin fechas en el grid) — se omite.", "error",
+        )
         return None
+
+    @staticmethod
+    def _parse_period(fecha_str: str) -> tuple | None:
+        """
+        'dd/mm/yyyy' → (año, mes). Retorna None si no se puede parsear.
+        Usado para desambiguar folios duplicados por periodo de la factura.
+        """
+        if not fecha_str:
+            return None
+        m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", str(fecha_str))
+        if not m:
+            return None
+        try:
+            return (int(m.group(3)), int(m.group(2)))  # (año, mes)
+        except Exception:
+            return None
 
     # ──────────────────────────────────────────────────────
     # Extract CC + Observaciones + Cuenta Contable from "Visualizar Factura" modal
@@ -449,6 +598,11 @@ class RPAAutomation:
 
         # Give the modal's Angular controller time to fetch Servicios via API
         await page.wait_for_timeout(2_500)
+
+        # Folio Fiscal (UUID del CFDI): se obtiene abriendo el visor XML desde la
+        # sección Documentos del propio modal. Va totalmente protegido: si falla
+        # devuelve "" y NUNCA rompe el resto de la extracción.
+        folio_fiscal = await self._extract_folio_fiscal(page)
 
         # Strategy 1: wait for .ngRow elements inside movimientosDetalleGrid
         cuentas_contables: list = []
@@ -503,7 +657,7 @@ class RPAAutomation:
                 if not poliza_lineas:
                     poliza_lineas = await self._extract_poliza_lineas(page)
                 self.log("  Sin sección Servicios para este folio.", "warn")
-                return "", "", "", "", "", "", "", cuentas_contables, poliza_lineas
+                return "", "", "", "", "", "", "", folio_fiscal, cuentas_contables, poliza_lineas
 
         await doc_btn.click()
 
@@ -518,7 +672,7 @@ class RPAAutomation:
 
         # Close OC document modal
         await self._close_modal(page, "content_modalDocOC")
-        return cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, cuentas_contables, poliza_lineas
+        return cc, obs, subtotal, descuento, iva, gastos_envio, total_oc, folio_fiscal, cuentas_contables, poliza_lineas
 
     # ──────────────────────────────────────────────────────
     # Extraer TODAS las Cuentas Contables del modal Visualizar Detalle
@@ -642,6 +796,51 @@ class RPAAutomation:
             return result if isinstance(result, list) else []
         except Exception:
             return []
+
+    # ──────────────────────────────────────────────────────
+    # Extraer el Folio Fiscal (UUID del CFDI) de la sección Documentos
+    # ──────────────────────────────────────────────────────
+    # UUID del SAT (Folio Fiscal): 8-4-4-4-12 hex. Va embebido en el nombre
+    # del archivo XML: title="Ver archivo: F_<UUID>.xml".
+    _UUID_RE = re.compile(
+        r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-'
+        r'[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+    )
+
+    async def _extract_folio_fiscal(self, page: Page) -> str:
+        """
+        El Folio Fiscal (UUID del CFDI) está embebido en el nombre del archivo
+        XML de la sección 'Documentos' del modal #content_modalVisualizar: el
+        botón 'Ver archivo' del XML de la FACTURA tiene
+        title="Ver archivo: F_<UUID>.xml". Lo leemos directo del atributo title
+        — sin abrir el visor, mucho más robusto.
+
+        Se usa <ver-archivo dir="dirxml"> (la factura); se ignora "dirNCxml"
+        que corresponde a la nota de crédito. Totalmente protegido: ante
+        cualquier fallo retorna "".
+        """
+        try:
+            # El nombre del XML (que contiene el UUID) puede tardar en poblarse
+            # tanto en el DOM como en el scope de Angular; reintentamos ~5s.
+            folio_fiscal = ""
+            for _ in range(10):
+                folio_fiscal = await page.evaluate(_JS_FOLIO_FISCAL)
+                if folio_fiscal:
+                    folio_fiscal = folio_fiscal.upper()
+                    break
+                await page.wait_for_timeout(500)
+
+            if folio_fiscal:
+                self.log(f"  Folio Fiscal: {folio_fiscal}", "info")
+            else:
+                # Diagnóstico del scope de Angular para ubicar el dato exacto
+                diag = await page.evaluate(_JS_FOLIO_FISCAL_DIAG)
+                self.log(f"  Folio Fiscal: no detectado. [diag {diag}]", "warn")
+            return folio_fiscal
+
+        except Exception as exc:
+            self.log(f"  Folio Fiscal: error ({exc}).", "warn")
+            return ""
 
     # ──────────────────────────────────────────────────────
     # Parse CC and Observaciones OC from the OC viewer modal
