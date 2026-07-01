@@ -9,7 +9,7 @@ import asyncio
 import subprocess
 import sys
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import flet as ft
@@ -1061,6 +1061,47 @@ class RPAApp:
             label="Número de póliza (campo NumPol en Contpaq)",
             value="1", keyboard_type=ft.KeyboardType.NUMBER, autofocus=True,
         )
+
+        # ── Fecha/periodo de la póliza (datepicker) ──
+        # Es la fecha que llevará el encabezado de la póliza en el TXT y con la
+        # que se nombran los archivos. Por defecto hoy, pero editable para
+        # declarar el periodo real (p. ej. cierre de junio corrido en julio).
+        self._poliza_fecha = date.today()
+        self._poliza_fecha_field = ft.TextField(
+            label="Fecha / periodo de la póliza",
+            value=self._poliza_fecha.strftime("%d/%m/%Y"),
+            read_only=True, expand=True,
+        )
+
+        def _on_fecha_change(ev):
+            d = self._poliza_date_picker.value
+            if d:
+                self._poliza_fecha = d.date() if isinstance(d, datetime) else d
+                self._poliza_fecha_field.value = self._poliza_fecha.strftime("%d/%m/%Y")
+                self.page.update()
+
+        self._poliza_date_picker = ft.DatePicker(
+            first_date=datetime(2020, 1, 1),
+            last_date=datetime(2035, 12, 31),
+            value=datetime.now(),
+            on_change=_on_fecha_change,
+        )
+
+        def _open_datepicker(ev):
+            self.page.open(self._poliza_date_picker)
+
+        fecha_row = ft.Row(
+            [
+                self._poliza_fecha_field,
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_CALENDAR,
+                    tooltip="Elegir fecha",
+                    on_click=_open_datepicker,
+                ),
+            ],
+            spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
         self._poliza_esquema_group = ft.RadioGroup(
             value="sipp",
             content=ft.Column(
@@ -1099,7 +1140,7 @@ class RPAApp:
             modal=True,
             title=ft.Text("Generar póliza"),
             content=ft.Column(
-                [self._poliza_num_field, ft.Divider(height=1), self._poliza_esquema_group],
+                [self._poliza_num_field, fecha_row, ft.Divider(height=1), self._poliza_esquema_group],
                 tight=True, width=420, spacing=10,
             ),
             actions=[
@@ -1126,31 +1167,35 @@ class RPAApp:
         path = e.files[0].path
         num_poliza = getattr(self, "_poliza_num", 1)
         esquema = getattr(self, "_poliza_esquema", "sipp")
+        fecha_poliza = getattr(self, "_poliza_fecha", date.today())
 
         self._log("─" * 62, "info")
-        self._log(f"Generando póliza TXT ({esquema}) desde: {Path(path).name}", "info")
+        self._log(
+            f"Generando póliza TXT ({esquema}) — fecha {fecha_poliza.strftime('%d/%m/%Y')} "
+            f"— desde: {Path(path).name}", "info",
+        )
         self.status_text = f"Generando póliza: {Path(path).name}…"
         self.status_lbl.value = self.status_text
         self.btn_poliza.disabled = True
         self.page.update()
 
-        self.page.run_task(self._poliza_task, path, num_poliza, esquema)
+        self.page.run_task(self._poliza_task, path, num_poliza, esquema, fecha_poliza)
 
-    async def _poliza_task(self, xlsx_path: str, num_poliza: int, esquema: str):
+    async def _poliza_task(self, xlsx_path: str, num_poliza: int, esquema: str, fecha_poliza: date):
         try:
-            await asyncio.to_thread(self._poliza_blocking, xlsx_path, num_poliza, esquema)
+            await asyncio.to_thread(self._poliza_blocking, xlsx_path, num_poliza, esquema, fecha_poliza)
         finally:
             self.btn_poliza.disabled = False
             self.page.update()
 
-    def _poliza_blocking(self, xlsx_path: str, num_poliza: int, esquema: str):
+    def _poliza_blocking(self, xlsx_path: str, num_poliza: int, esquema: str, fecha_poliza: date):
         try:
             if esquema == "individual":
-                self._poliza_blocking_individual(xlsx_path, num_poliza)
+                self._poliza_blocking_individual(xlsx_path, num_poliza, fecha_poliza)
             elif esquema == "proveedores":
-                self._poliza_blocking_proveedores(xlsx_path, num_poliza)
+                self._poliza_blocking_proveedores(xlsx_path, num_poliza, fecha_poliza)
             else:
-                self._poliza_blocking_sipp(xlsx_path, num_poliza)
+                self._poliza_blocking_sipp(xlsx_path, num_poliza, fecha_poliza)
         except Exception as exc:
             import traceback
             self._log(f"Error generando póliza: {exc}", "error")
@@ -1159,11 +1204,12 @@ class RPAApp:
             self.status_lbl.value = self.status_text
             self.page.update()
 
-    def _poliza_blocking_sipp(self, xlsx_path: str, num_poliza: int):
+    def _poliza_blocking_sipp(self, xlsx_path: str, num_poliza: int, fecha_poliza: date):
         from rpa.poliza_generator import generar_polizas_almacen
 
         resultado = generar_polizas_almacen(
             xlsx_path,
+            fecha_poliza=fecha_poliza,
             num_poliza_provision=num_poliza,
             num_poliza_entrada=num_poliza + 1,
             num_poliza_salida=num_poliza + 2,
@@ -1187,11 +1233,12 @@ class RPAApp:
         if resultado.get("sucursales_sin_almacen"):
             self._show_missing_almacen_dialog(resultado["sucursales_sin_almacen"])
 
-    def _poliza_blocking_individual(self, xlsx_path: str, num_poliza: int):
+    def _poliza_blocking_individual(self, xlsx_path: str, num_poliza: int, fecha_poliza: date):
         from rpa.poliza_generator import generar_poliza_individual
 
         resultado = generar_poliza_individual(
             xlsx_path,
+            fecha_poliza=fecha_poliza,
             num_poliza=num_poliza,
             log_fn=self._log,
         )
@@ -1219,11 +1266,12 @@ class RPAApp:
                 resultado.get("proveedores_sin_cuenta") or [],
             )
 
-    def _poliza_blocking_proveedores(self, xlsx_path: str, num_poliza: int):
+    def _poliza_blocking_proveedores(self, xlsx_path: str, num_poliza: int, fecha_poliza: date):
         from rpa.poliza_generator import generar_poliza_proveedores
 
         resultado = generar_poliza_proveedores(
             xlsx_path,
+            fecha_poliza=fecha_poliza,
             num_poliza=num_poliza,
             log_fn=self._log,
         )
